@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from app.config import Channel, Settings
+from app.main import create_app
+
+
+def settings(tmp_path: Path, *, key: str = "test-secret") -> Settings:
+    return Settings(
+        app_name="測試新聞 M3U",
+        channels_path=tmp_path / "channels.json",
+        access_key=key,
+        public_base_url="https://relay.example",
+        max_height=720,
+        resolver_ttl_seconds=900,
+        resolver_failure_ttl_seconds=90,
+        resolver_timeout_seconds=60,
+        resolver_max_concurrency=2,
+        media_token_ttl_seconds=21600,
+        upstream_timeout_seconds=25.0,
+        max_token_entries=30000,
+        log_level="WARNING",
+    )
+
+
+def channels() -> tuple[Channel, ...]:
+    return (
+        Channel(
+            id="test-news",
+            name="測試新聞",
+            group="綜合新聞",
+            short_name="測試",
+            sources=("https://www.youtube.com/@example/live",),
+        ),
+    )
+
+
+def test_health_and_config_do_not_require_key(tmp_path: Path) -> None:
+    app = create_app(settings=settings(tmp_path), channels=channels())
+    with TestClient(app) as client:
+        health = client.get("/healthz")
+        assert health.status_code == 200
+        assert health.json()["channels"] == 1
+
+        config = client.get("/api/config")
+        assert config.status_code == 200
+        assert config.json()["access_required"] is True
+        assert config.json()["public_base_url"] == "https://relay.example"
+
+
+def test_m3u_requires_key_and_contains_fixed_relay_url(tmp_path: Path) -> None:
+    app = create_app(settings=settings(tmp_path), channels=channels())
+    with TestClient(app) as client:
+        assert client.get("/live.m3u").status_code == 401
+
+        response = client.get("/live.m3u?key=test-secret")
+        assert response.status_code == 200
+        assert response.text.startswith("#EXTM3U")
+        assert '#EXTINF:-1 tvg-id="test-news"' in response.text
+        assert (
+            "https://relay.example/hls/test-news/master.m3u8?key=test-secret"
+            in response.text
+        )
+
+
+def test_status_requires_key(tmp_path: Path) -> None:
+    app = create_app(settings=settings(tmp_path), channels=channels())
+    with TestClient(app) as client:
+        assert client.get("/api/status").status_code == 401
+        response = client.get("/api/status?key=test-secret")
+        assert response.status_code == 200
+        assert response.json()["channels"][0]["state"] == "idle"
+
+
+def test_key_is_optional_when_not_configured(tmp_path: Path) -> None:
+    app = create_app(settings=settings(tmp_path, key=""), channels=channels())
+    with TestClient(app) as client:
+        response = client.get("/live.m3u")
+        assert response.status_code == 200
+        assert "?key=" not in response.text
+
+
+def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
+    import asyncio
+    import urllib.parse
+    from datetime import UTC, datetime, timedelta
+
+    import httpx
+
+    from app.models import ResolvedStream, ResolverStatus
+
+    channel_set = channels()
+
+    class FakeResolver:
+        def __init__(self) -> None:
+            self.invalidated = False
+            self.status = ResolverStatus(state="online")
+
+        def channel(self, channel_id: str) -> Channel:
+            if channel_id != "test-news":
+                raise KeyError(channel_id)
+            return channel_set[0]
+
+        async def resolve(self, channel_id: str, *, force: bool = False) -> ResolvedStream:
+            now = datetime.now(tz=UTC)
+            return ResolvedStream(
+                channel_id=channel_id,
+                source=channel_set[0].sources[0],
+                stream_url="https://manifest.googlevideo.com/master.m3u8",
+                webpage_url=channel_set[0].sources[0],
+                title="測試直播",
+                video_id="abc123",
+                protocol="m3u8_native",
+                height=720,
+                headers={"User-Agent": "relay-test"},
+                resolved_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+
+        def invalidate(self, channel_id: str) -> None:
+            self.invalidated = True
+
+        def status_snapshot(self) -> dict[str, ResolverStatus]:
+            return {"test-news": self.status}
+
+    segment_bytes = b"\x00\x01fake-mpeg-ts-data"
+
+    class StaticAsyncStream(httpx.AsyncByteStream):
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+
+        async def __aiter__(self):
+            yield self.content
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("user-agent") == "relay-test"
+        path = request.url.path
+        if path == "/master.m3u8":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/vnd.apple.mpegurl"},
+                stream=StaticAsyncStream(b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nvariant.m3u8\n"),
+                request=request,
+            )
+        if path == "/variant.m3u8":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/x-mpegURL"},
+                stream=StaticAsyncStream(b"#EXTM3U\n#EXTINF:4.0,\nsegment-001.ts\n"),
+                request=request,
+            )
+        if path == "/segment-001.ts":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "video/mp2t", "Content-Length": str(len(segment_bytes))},
+                stream=StaticAsyncStream(segment_bytes),
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app = create_app(
+        settings=settings(tmp_path),
+        channels=channel_set,
+        resolver=FakeResolver(),  # type: ignore[arg-type]
+        http_client=async_client,
+    )
+
+    with TestClient(app) as client:
+        master = client.get("/hls/test-news/master.m3u8?key=test-secret")
+        assert master.status_code == 200
+        assert "manifest.googlevideo.com" not in master.text
+        master_media_url = next(
+            line for line in master.text.splitlines() if line.startswith("https://relay.example/media/")
+        )
+
+        parsed_master = urllib.parse.urlparse(master_media_url)
+        variant = client.get(parsed_master.path + "?" + parsed_master.query)
+        assert variant.status_code == 200
+        assert "segment-001.ts" not in variant.text
+        segment_url = next(
+            line for line in variant.text.splitlines() if line.startswith("https://relay.example/media/")
+        )
+
+        parsed_segment = urllib.parse.urlparse(segment_url)
+        segment = client.get(parsed_segment.path + "?" + parsed_segment.query)
+        assert segment.status_code == 200
+        assert segment.content == segment_bytes
+        assert segment.headers["content-type"].startswith("video/mp2t")
+
+    asyncio.run(async_client.aclose())
+
+
+def test_direct_tubo_import_uses_custom_app_scheme(tmp_path: Path) -> None:
+    import urllib.parse
+
+    app = create_app(settings=settings(tmp_path), channels=channels())
+    with TestClient(app) as client:
+        response = client.get(
+            "/import-to-tubo?key=test-secret", follow_redirects=False
+        )
+        assert response.status_code == 302
+        location = response.headers["location"]
+        assert location.startswith("tubo://import?")
+        parsed = urllib.parse.urlparse(location)
+        query = urllib.parse.parse_qs(parsed.query)
+        assert query["url"] == ["https://relay.example/live.m3u?key=test-secret"]
+        assert query["name"] == ["測試新聞 M3U"]
