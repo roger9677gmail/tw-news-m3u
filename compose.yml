@@ -1,0 +1,17 @@
+services:
+  tw-news-m3u:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tw-news-m3u
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8787:8000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=512m,mode=1777
