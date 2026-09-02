@@ -13,6 +13,7 @@ on:
       - "app/models.py"
       - "app/resolver.py"
       - "scripts/generate_static_m3u.py"
+      - "scripts/run_static_with_clients.py"
       - ".github/workflows/publish-static-m3u.yml"
 
 permissions:
@@ -51,7 +52,7 @@ jobs:
           MAX_HEIGHT: "720"
           MAX_RESOLVER_CONCURRENCY: "3"
           RESOLVER_TIMEOUT_SECONDS: "100"
-        run: python scripts/generate_static_m3u.py --output dist --min-success 1
+        run: python scripts/run_static_with_clients.py --output dist --min-success 1
 
       - name: Publish generated files to gh-pages branch
         shell: bash
