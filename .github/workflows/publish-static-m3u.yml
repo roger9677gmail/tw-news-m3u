@@ -1,0 +1,71 @@
+name: Publish experimental static M3U
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub schedules use UTC. Run twice per hour, away from the top of the hour.
+    - cron: "13,43 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - "channels.json"
+      - "app/config.py"
+      - "app/models.py"
+      - "app/resolver.py"
+      - "scripts/generate_static_m3u.py"
+      - ".github/workflows/publish-static-m3u.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-static-m3u
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Deno for yt-dlp JavaScript challenges
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: latest
+
+      - name: Install current yt-dlp
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade "yt-dlp[default,curl-cffi]"
+
+      - name: Resolve live channels and generate M3U
+        env:
+          MAX_HEIGHT: "720"
+          MAX_RESOLVER_CONCURRENCY: "3"
+          RESOLVER_TIMEOUT_SECONDS: "100"
+        run: python scripts/generate_static_m3u.py --output dist --min-success 1
+
+      - name: Publish generated files to gh-pages branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          site_dir="$(mktemp -d)"
+          cp -a dist/. "$site_dir/"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --orphan gh-pages
+          git rm -rf . >/dev/null 2>&1 || true
+          git clean -fdx >/dev/null 2>&1 || true
+          cp -a "$site_dir/." .
+          git add -A
+          git commit -m "Update experimental static M3U"
+          git push --force origin HEAD:gh-pages
