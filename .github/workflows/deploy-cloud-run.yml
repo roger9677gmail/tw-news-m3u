@@ -1,0 +1,114 @@
+name: Deploy to Google Cloud Run
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "requirements.txt"
+      - "channels.json"
+      - "app/**"
+      - "gcp/**"
+      - ".github/workflows/deploy-cloud-run.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: google-cloud-run-production
+  cancel-in-progress: true
+
+env:
+  SERVICE_NAME: tw-news-m3u
+  ARTIFACT_REPOSITORY: tw-news-m3u
+
+jobs:
+  deploy:
+    if: >-
+      ${{ vars.GCP_PROJECT_ID != '' &&
+          vars.GCP_REGION != '' &&
+          vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' &&
+          vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' &&
+          vars.GCP_RUNTIME_SERVICE_ACCOUNT != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud without a stored JSON key
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Log in to Artifact Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set image URI
+        id: image
+        shell: bash
+        run: |
+          echo "uri=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${ARTIFACT_REPOSITORY}/${SERVICE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build container
+        run: docker build --tag "${{ steps.image.outputs.uri }}" .
+
+      - name: Push container
+        run: docker push "${{ steps.image.outputs.uri }}"
+
+      - name: Deploy Cloud Run service
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          region: ${{ vars.GCP_REGION }}
+          service: ${{ env.SERVICE_NAME }}
+          image: ${{ steps.image.outputs.uri }}
+          timeout: 3600s
+          env_vars_update_strategy: overwrite
+          env_vars: |-
+            APP_NAME=台灣新聞直播 M3U
+            MAX_HEIGHT=720
+            RESOLVER_TTL_SECONDS=900
+            RESOLVER_FAILURE_TTL_SECONDS=90
+            RESOLVER_TIMEOUT_SECONDS=100
+            MAX_RESOLVER_CONCURRENCY=2
+            MEDIA_TOKEN_TTL_SECONDS=21600
+            MAX_TOKEN_ENTRIES=30000
+            UPSTREAM_TIMEOUT_SECONDS=25
+            LOG_LEVEL=INFO
+            TZ=Asia/Taipei
+          secrets_update_strategy: overwrite
+          secrets: |-
+            ACCESS_KEY=tw-news-access-key:latest
+          flags: >-
+            --allow-unauthenticated
+            --ingress=all
+            --port=8080
+            --cpu=1
+            --memory=1Gi
+            --concurrency=20
+            --min-instances=0
+            --max-instances=1
+            --execution-environment=gen2
+            --service-account=${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+            --cpu-boost
+
+      - name: Verify health endpoint
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --retry 8 --retry-delay 3 \
+            "${{ steps.deploy.outputs.url }}/healthz"
+          echo
+          echo "Cloud Run URL: ${{ steps.deploy.outputs.url }}"
