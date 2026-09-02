@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#11151c">
+  <meta name="description" content="把台灣新聞台官方公開直播轉成途播可匯入的固定 M3U 清單。">
+  <title>台灣新聞直播 M3U</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="badge">NAS LIVE RELAY</div>
+      <h1>台灣新聞直播<br><span>M3U</span></h1>
+      <p>把各新聞台的官方公開直播即時轉成固定清單，供途播或其他支援 M3U/HLS 的播放器使用。</p>
+    </header>
+
+    <section class="panel setup-panel" aria-labelledby="playlist-title">
+      <div class="panel-heading">
+        <div>
+          <p class="kicker">PLAYLIST</p>
+          <h2 id="playlist-title">途播匯入網址</h2>
+        </div>
+        <span id="server-state" class="server-state">連線中</span>
+      </div>
+
+      <label class="field" id="key-field">
+        <span>專用播放權杖</span>
+        <input id="access-key" type="password" autocomplete="current-password" placeholder="輸入 .env 的 ACCESS_KEY；不要用 NAS 帳號密碼">
+      </label>
+
+      <div class="url-box">
+        <code id="playlist-url">讀取中…</code>
+      </div>
+      <div class="actions">
+        <button type="button" id="copy-playlist" class="primary">複製 M3U 網址</button>
+        <a id="tubo-import" class="button" href="#" rel="noopener">直接開啟途播</a>
+        <a id="open-playlist" class="button quiet" href="#" target="_blank" rel="noopener">查看清單</a>
+      </div>
+      <p class="hint">這是本服務專用的播放權杖，不要使用 NAS、Google 或其他帳號密碼，也不要分享完整 M3U 網址。</p>
+    </section>
+
+    <section class="summary" aria-label="頻道狀態摘要">
+      <div><strong id="count-total">–</strong><span>全部頻道</span></div>
+      <div><strong id="count-online">–</strong><span>已解析</span></div>
+      <div><strong id="count-error">–</strong><span>解析失敗</span></div>
+      <div><strong id="max-height">–</strong><span>最高畫質</span></div>
+    </section>
+
+    <section aria-labelledby="channels-title">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">CHANNELS</p>
+          <h2 id="channels-title">新聞台</h2>
+        </div>
+        <button type="button" id="refresh-status" class="quiet">重新整理</button>
+      </div>
+      <div id="notice" class="notice" hidden></div>
+      <div id="channel-grid" class="channel-grid" aria-busy="true"></div>
+    </section>
+
+    <section class="panel guide" aria-labelledby="guide-title">
+      <p class="kicker">QUICK START</p>
+      <h2 id="guide-title">使用方式</h2>
+      <ol>
+        <li>在上方輸入本服務專用的播放權杖。</li>
+        <li>按「複製 M3U 網址」，到途播新增遠端 M3U 清單。</li>
+        <li>第一次點某個頻道時，NAS 會現場解析直播，通常需要幾秒。</li>
+      </ol>
+      <p class="safety"><strong>行車安全：</strong>請只在安全停車時操作與觀看影像；行駛中應以音訊為主並遵守當地法規。</p>
+      <p class="fine-print">本服務不保存影片、不破解 DRM，也不加入付費或私人來源。影像資料會從官方公開來源經你的 NAS 轉送，因此會使用 NAS 的下載與上傳頻寬。</p>
+    </section>
+
+    <footer>
+      <span id="footer-version">Taiwan News M3U Relay</span>
+      <span>·</span>
+      <a href="/healthz" target="_blank" rel="noopener">健康檢查</a>
+    </footer>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
