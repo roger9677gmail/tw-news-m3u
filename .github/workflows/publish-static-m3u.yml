@@ -1,20 +1,9 @@
-name: Publish experimental static M3U
+name: Manual experiment - static M3U
 
+# GitHub-hosted runner IPs are currently challenged by YouTube for these
+# channels. Keep this workflow manual so it does not create repeated failures.
 on:
   workflow_dispatch:
-  schedule:
-    # GitHub schedules use UTC. Run twice per hour, away from the top of the hour.
-    - cron: "13,43 * * * *"
-  push:
-    branches: [main]
-    paths:
-      - "channels.json"
-      - "app/config.py"
-      - "app/models.py"
-      - "app/resolver.py"
-      - "scripts/generate_static_m3u.py"
-      - "scripts/run_static_with_clients.py"
-      - ".github/workflows/publish-static-m3u.yml"
 
 permissions:
   contents: write
