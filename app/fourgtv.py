@@ -26,6 +26,9 @@ APP_USER_AGENT = (
     "%E5%9B%9B%E5%AD%A3%E7%B7%9A%E4%B8%8A/1 "
     "CFNetwork/1568.200.51 Darwin/24.1.0"
 )
+# Keep the public mobile-client protocol version configurable so a future
+# official app update does not require changing request logic in multiple places.
+APP_VERSION = os.getenv("FOURGTV_APP_VERSION", "3.2.17").strip() or "3.2.17"
 
 # These values are part of 4GTV's public iOS client protocol.  They are not a
 # user credential and the resulting authorization value changes every UTC day.
@@ -57,7 +60,7 @@ def _request_headers(encryption_key: str, now: datetime) -> dict[str, str]:
         "4GTV_AUTH": daily_auth(now.astimezone(UTC).date()),
         "fsDEVICE": "iOS",
         "fsVALUE": "",
-        "fsVERSION": "3.2.1",
+        "fsVERSION": APP_VERSION,
         "fsENC_KEY": encryption_key,
         "User-Agent": APP_USER_AGENT,
         "Content-Type": "application/json",
