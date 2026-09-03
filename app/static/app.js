@@ -16,7 +16,6 @@ const els = {
   maxHeight: document.querySelector('#max-height'),
   toast: document.querySelector('#toast'),
   karaokeSection: document.querySelector('#karaoke-section'),
-  karaokeTitle: document.querySelector('#karaoke-title-input'),
   karaokeFile: document.querySelector('#karaoke-file'),
   karaokeRights: document.querySelector('#karaoke-rights'),
   karaokeUpload: document.querySelector('#upload-karaoke'),
@@ -30,6 +29,7 @@ const els = {
 
 let config = null;
 let statusTimer = null;
+let karaokeUploading = false;
 const STORAGE_KEY = 'tw-news-m3u-access-key';
 
 function escapeHtml(value) {
@@ -186,7 +186,11 @@ async function loadKaraoke({ quiet = false } = {}) {
   }
 }
 
-function uploadToStorage(uploadUrl, file) {
+function titleFromFileName(fileName) {
+  return fileName.replace(/\.mp4$/i, '').trim() || fileName;
+}
+
+function uploadToStorage(uploadUrl, file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', uploadUrl);
@@ -195,8 +199,7 @@ function uploadToStorage(uploadUrl, file) {
     xhr.upload.addEventListener('progress', (event) => {
       if (!event.lengthComputable) return;
       const percent = Math.round((event.loaded / event.total) * 100);
-      els.karaokeProgress.value = percent;
-      els.karaokeProgressText.textContent = `上傳中 ${percent}%`;
+      onProgress(percent);
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve();
@@ -207,23 +210,61 @@ function uploadToStorage(uploadUrl, file) {
   });
 }
 
+async function uploadOneKaraoke(file, index, total) {
+  const position = `第 ${index + 1}/${total} 首`;
+  els.karaokeProgress.value = Math.round((index / total) * 100);
+  els.karaokeProgressText.textContent = `${position}：${file.name}，建立安全上傳連結…`;
+  const upload = await requestJson(`/api/karaoke/uploads${authQuery()}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      file_name: file.name,
+      size_bytes: file.size,
+      rights_confirmed: true,
+    }),
+  });
+  await uploadToStorage(upload.upload_url, file, (percent) => {
+    const overall = Math.round(((index + (percent / 100)) / total) * 100);
+    els.karaokeProgress.value = overall;
+    els.karaokeProgressText.textContent = `${position}：${file.name}，上傳中 ${percent}%`;
+  });
+  els.karaokeProgress.removeAttribute('value');
+  els.karaokeProgressText.textContent = `${position}：${file.name}，正在轉成 720p M3U8…`;
+  const result = await requestJson(
+    `/api/karaoke/uploads/${encodeURIComponent(upload.upload_id)}/complete${authQuery()}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: titleFromFileName(file.name),
+        file_name: file.name,
+      }),
+    },
+  );
+  return result.song;
+}
+
 async function uploadKaraoke() {
   if (config?.access_required && !keyValue()) {
     showToast('請先輸入播放權杖');
     els.accessKey.focus();
     return;
   }
-  const file = els.karaokeFile.files?.[0];
-  if (!file) {
-    showToast('請先選擇 MP4 影片');
+  const files = Array.from(els.karaokeFile.files || []);
+  if (!files.length) {
+    showToast('請先選擇一個或多個 MP4 影片');
     return;
   }
-  if (!file.name.toLowerCase().endsWith('.mp4')) {
-    showToast('只能上傳 MP4 影片');
+  const invalidFile = files.find((file) => !file.name.toLowerCase().endsWith('.mp4'));
+  if (invalidFile) {
+    showToast(`${invalidFile.name} 不是 MP4 影片`);
     return;
   }
-  if (file.size > Number(config.karaoke_max_upload_bytes || 0)) {
-    showToast('影片超過上傳大小限制');
+  const oversizedFile = files.find(
+    (file) => file.size > Number(config.karaoke_max_upload_bytes || 0),
+  );
+  if (oversizedFile) {
+    showToast(`${oversizedFile.name} 超過單檔大小限制`);
     return;
   }
   if (!els.karaokeRights.checked) {
@@ -231,48 +272,47 @@ async function uploadKaraoke() {
     return;
   }
 
+  karaokeUploading = true;
   els.karaokeUpload.disabled = true;
+  els.karaokeFile.disabled = true;
+  els.karaokeRights.disabled = true;
   els.karaokeProgressWrap.hidden = false;
   els.karaokeProgress.value = 0;
-  els.karaokeProgressText.textContent = '建立安全上傳連結…';
-  try {
-    const upload = await requestJson(`/api/karaoke/uploads${authQuery()}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        file_name: file.name,
-        size_bytes: file.size,
-        rights_confirmed: true,
-      }),
-    });
-    await uploadToStorage(upload.upload_url, file);
-    els.karaokeProgress.removeAttribute('value');
-    els.karaokeProgressText.textContent = '正在轉成 720p M3U8，請不要關閉本頁…';
-    const result = await requestJson(
-      `/api/karaoke/uploads/${encodeURIComponent(upload.upload_id)}/complete${authQuery()}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: els.karaokeTitle.value.trim(),
-          file_name: file.name,
-        }),
-      },
-    );
-    els.karaokeProgress.value = 100;
-    els.karaokeProgressText.textContent = '完成';
-    els.karaokeTitle.value = '';
-    els.karaokeFile.value = '';
-    els.karaokeRights.checked = false;
-    showToast(`${result.song.title} 已加入途播清單`);
-    await loadKaraoke();
-  } catch (error) {
-    els.karaokeProgress.value = 0;
-    els.karaokeProgressText.textContent = `失敗：${error.message}`;
-    showToast(`上傳失敗：${error.message}`);
-  } finally {
-    els.karaokeUpload.disabled = false;
+  const succeeded = [];
+  const failed = [];
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    try {
+      succeeded.push(await uploadOneKaraoke(file, index, files.length));
+    } catch (error) {
+      failed.push({ file: file.name, message: error.message });
+    }
   }
+  karaokeUploading = false;
+  els.karaokeProgress.value = 100;
+  els.karaokeProgressText.textContent = failed.length
+    ? `批次完成：${succeeded.length} 首成功，${failed.length} 首失敗`
+    : `完成：${succeeded.length} 首已加入途播清單`;
+  els.karaokeFile.value = '';
+  els.karaokeRights.checked = false;
+  els.karaokeUpload.disabled = false;
+  els.karaokeFile.disabled = false;
+  els.karaokeRights.disabled = false;
+  updateKaraokeSelection();
+  await loadKaraoke();
+  if (failed.length) {
+    els.karaokeNotice.textContent = `已成功 ${succeeded.length} 首。失敗：${failed.map((item) => `${item.file}（${item.message}）`).join('、')}`;
+    showToast(`${succeeded.length} 首成功，${failed.length} 首失敗`);
+  } else {
+    showToast(`${succeeded.length} 首已全部加入途播清單`);
+  }
+}
+
+function updateKaraokeSelection() {
+  const count = els.karaokeFile.files?.length || 0;
+  els.karaokeUpload.textContent = count
+    ? `批次上傳並轉換 ${count} 個檔案`
+    : '批次上傳並轉成 M3U8';
 }
 
 async function deleteKaraoke(button) {
@@ -371,9 +411,16 @@ els.copyPlaylist.addEventListener('click', async () => {
 els.refresh.addEventListener('click', () => loadStatus());
 els.karaokeRefresh.addEventListener('click', () => loadKaraoke());
 els.karaokeUpload.addEventListener('click', uploadKaraoke);
+els.karaokeFile.addEventListener('change', updateKaraokeSelection);
 els.grid.addEventListener('click', (event) => {
   const button = event.target.closest('.probe');
   if (button) probe(button);
+});
+
+window.addEventListener('beforeunload', (event) => {
+  if (!karaokeUploading) return;
+  event.preventDefault();
+  event.returnValue = '';
 });
 els.karaokeGrid.addEventListener('click', (event) => {
   const button = event.target.closest('.delete-song');

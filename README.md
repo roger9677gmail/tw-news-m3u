@@ -148,11 +148,11 @@ http://NAS區網IP:8787/live.m3u?key=你的存取密碼
 
 ## KTV 點歌（Cloud Run）
 
-Cloud Run 版的管理頁可從 iPhone「檔案」選擇 Google Drive 裡的 MP4，上傳後自動轉成 720p HLS，並加入同一份途播清單的「KTV 點歌」群組。
+Cloud Run 版的管理頁可從 iPhone「檔案」一次多選 Google Drive 裡的 MP4，逐首自動轉成 720p HLS，並加入同一份途播清單的「KTV 點歌」群組。歌曲名稱會使用原始檔名（不含 `.mp4`）。
 
 1. 先執行 `gcp/setup-karaoke-storage.sh` 建立私人 Cloud Storage bucket。
 2. 打開 Cloud Run 管理頁，輸入播放權杖。
-3. 填寫歌曲名稱、選擇 MP4，勾選使用權確認後上傳。
+3. 一次選擇一個或多個 MP4，勾選使用權確認後批次上傳。
 4. 等到顯示完成，再到途播重新整理遠端清單。
 
 影片會存在私人 Cloud Storage，不會放進 GitHub。從管理頁刪除歌曲時，目錄記錄、M3U8 和所有 TS 分段會一起刪除。單檔上限預設為 600 MB；只能上傳你有權使用與儲存的影片。

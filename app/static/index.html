@@ -74,18 +74,15 @@
 
       <div class="panel karaoke-upload">
         <label class="field">
-          <span>歌曲名稱</span>
-          <input id="karaoke-title-input" type="text" maxlength="120" placeholder="例如：歌手－歌名">
+          <span>MP4 影片（可一次多選）</span>
+          <input id="karaoke-file" type="file" accept="video/mp4,.mp4" multiple>
         </label>
-        <label class="field">
-          <span>MP4 影片</span>
-          <input id="karaoke-file" type="file" accept="video/mp4,.mp4">
-        </label>
+        <p class="hint">歌曲名稱會自動使用檔名，並移除最後的 .mp4。影片會逐首轉檔，請勿關閉此頁。</p>
         <label class="rights-check">
           <input id="karaoke-rights" type="checkbox">
           <span>我擁有此影片的使用與雲端上傳權利，只供自己的途播清單使用。</span>
         </label>
-        <button type="button" id="upload-karaoke" class="primary">上傳並轉成 M3U8</button>
+        <button type="button" id="upload-karaoke" class="primary">批次上傳並轉成 M3U8</button>
         <div id="karaoke-progress-wrap" class="progress-wrap" hidden>
           <progress id="karaoke-progress" max="100" value="0"></progress>
           <span id="karaoke-progress-text">準備中…</span>

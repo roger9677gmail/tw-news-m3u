@@ -17,7 +17,7 @@
 PROJECT_ID=你的專案ID REGION=asia-east1 bash gcp/setup-karaoke-storage.sh
 ```
 
-這會建立禁止公開存取的 Cloud Storage bucket、授權 Cloud Run 執行帳號管理影片，並在 GitHub CLI 已登入時寫入 `KARAOKE_BUCKET` repository variable。Cloud Run 部署後，即可從管理頁上傳有使用權的 MP4，自動轉成 HLS 並加進途播的「KTV 點歌」群組。
+這會建立禁止公開存取的 Cloud Storage bucket、授權 Cloud Run 執行帳號管理影片，並在 GitHub CLI 已登入時寫入 `KARAOKE_BUCKET` repository variable。Cloud Run 部署後，即可從管理頁批次選擇有使用權的 MP4，依檔名逐首轉成 HLS，並加進途播的「KTV 點歌」群組。
 
 ## 需求
 

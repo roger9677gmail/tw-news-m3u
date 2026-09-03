@@ -52,6 +52,19 @@ def test_health_and_config_do_not_require_key(tmp_path: Path) -> None:
         assert config.json()["public_base_url"] == "https://relay.example"
 
 
+def test_dashboard_supports_batch_mp4_selection(tmp_path: Path) -> None:
+    app = create_app(settings=settings(tmp_path), channels=channels())
+    with TestClient(app) as client:
+        page = client.get("/")
+        script = client.get("/static/app.js")
+
+        assert page.status_code == 200
+        assert 'id="karaoke-file" type="file" accept="video/mp4,.mp4" multiple' in page.text
+        assert 'id="karaoke-title-input"' not in page.text
+        assert "Array.from(els.karaokeFile.files || [])" in script.text
+        assert "titleFromFileName(file.name)" in script.text
+
+
 def test_m3u_requires_key_and_contains_fixed_relay_url(tmp_path: Path) -> None:
     app = create_app(settings=settings(tmp_path), channels=channels())
     with TestClient(app) as client:
