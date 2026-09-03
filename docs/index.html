@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1017">
+  <meta name="description" content="台灣新聞直播 M3U Relay 專案入口與部署說明。">
+  <title>台灣新聞直播 M3U Relay</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow"><span aria-hidden="true"></span> PROJECT STATUS</p>
+      <h1>台灣新聞直播<br><em>M3U Relay</em></h1>
+      <p class="lead">把台灣新聞台的官方公開 YouTube 直播，轉成途播與 HLS 播放器可使用的固定清單。</p>
+      <div class="actions">
+        <a class="button primary" href="https://github.com/roger9677gmail/tw-news-m3u">查看 GitHub 原始碼</a>
+        <a class="button" href="https://github.com/roger9677gmail/tw-news-m3u/blob/main/README.md#b-%E5%9C%A8-synology-nas-%E5%95%9F%E5%8B%95">NAS 安裝說明</a>
+      </div>
+    </header>
+
+    <section class="status-grid" aria-label="服務狀態">
+      <article class="status-card online">
+        <div class="status-heading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <h2>專案入口</h2>
+        </div>
+        <strong>正常上線</strong>
+        <p>你現在看到的是由 GitHub Pages 提供的靜態專案說明頁。</p>
+      </article>
+
+      <article class="status-card runtime">
+        <div class="status-heading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <h2>直播 Relay</h2>
+        </div>
+        <strong>需另行部署</strong>
+        <p>即時解析、M3U 產生與 HLS 轉送必須在 NAS、Docker 或 Cloud Run 執行。</p>
+      </article>
+    </section>
+
+    <section class="panel explanation">
+      <p class="kicker">WHY A RELAY?</p>
+      <h2>為什麼不能直接在這裡播放？</h2>
+      <p>YouTube 的 HLS 網址會過期，而且部分串流要求「解析網址」與「讀取影音」使用相同網路出口。GitHub Pages 只能提供靜態檔案，不能在點台時執行 Python、解析直播或轉送影音。</p>
+      <div class="flow" aria-label="系統資料流">
+        <div><small>01</small><b>官方直播</b><span>YouTube</span></div>
+        <i aria-hidden="true">→</i>
+        <div><small>02</small><b>你的 Relay</b><span>NAS / Cloud Run</span></div>
+        <i aria-hidden="true">→</i>
+        <div><small>03</small><b>播放裝置</b><span>途播 / HLS Player</span></div>
+      </div>
+    </section>
+
+    <section class="steps" aria-labelledby="start-title">
+      <div class="section-heading">
+        <p class="kicker">QUICK START</p>
+        <h2 id="start-title">選擇執行方式</h2>
+      </div>
+      <div class="step-grid">
+        <article>
+          <span>推薦</span>
+          <h3>Synology NAS / Docker</h3>
+          <p>使用自己的網路出口，較適合長時間播放，也不會產生雲端影音流量費。</p>
+          <a href="https://github.com/roger9677gmail/tw-news-m3u/blob/main/README.md#b-%E5%9C%A8-synology-nas-%E5%95%9F%E5%8B%95">開啟安裝步驟 <b aria-hidden="true">↗</b></a>
+        </article>
+        <article>
+          <span>固定 HTTPS</span>
+          <h3>Google Cloud Run</h3>
+          <p>可取得公開 HTTPS 網址；雲端出口仍可能受到 YouTube 驗證，並可能產生費用。</p>
+          <a href="https://github.com/roger9677gmail/tw-news-m3u/blob/main/GOOGLE_CLOUD.md">開啟部署步驟 <b aria-hidden="true">↗</b></a>
+        </article>
+      </div>
+    </section>
+
+    <aside class="notice">
+      <strong>關於靜態 M3U 實驗</strong>
+      <p>GitHub-hosted runner 目前會被 YouTube 要求機器人驗證，因此無法可靠地定時產生可播放清單。專案已保留手動測試流程，但不把失敗或空白清單發佈給使用者。</p>
+    </aside>
+
+    <footer>
+      <span>Taiwan News M3U Relay</span>
+      <a href="https://github.com/roger9677gmail/tw-news-m3u/blob/main/LICENSE">MIT License</a>
+    </footer>
+  </main>
+</body>
+</html>

@@ -2,6 +2,8 @@
 
 將台灣新聞台的**官方公開 YouTube 直播**，即時轉成途播與其他 HLS/M3U 播放器可使用的固定清單。
 
+專案入口：<https://roger9677gmail.github.io/tw-news-m3u/>（GitHub Pages 僅提供靜態說明；直播 Relay 仍需依下方步驟部署。）
+
 ## 為什麼不是只放一個 GitHub Pages 網址？
 
 YouTube 直播的實際 HLS 網址會過期，而且部分網址必須由「解析它的同一個網路出口」取回。GitHub Pages 只能放靜態檔案，不能在途播點台時現場解析與轉送，因此本專案採用：
