@@ -37,10 +37,19 @@ class Settings:
     upstream_timeout_seconds: float
     max_token_entries: int
     log_level: str
+    gcp_project_id: str = ""
+    karaoke_bucket: str = ""
+    karaoke_prefix: str = "karaoke"
+    karaoke_max_upload_bytes: int = 600 * 1024 * 1024
+    karaoke_ffmpeg_timeout_seconds: int = 3300
 
     @property
     def access_required(self) -> bool:
         return bool(self.access_key)
+
+    @property
+    def karaoke_enabled(self) -> bool:
+        return bool(self.karaoke_bucket)
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -84,6 +93,18 @@ def load_settings() -> Settings:
         upstream_timeout_seconds=_float_env("UPSTREAM_TIMEOUT_SECONDS", 25.0, 5.0, 120.0),
         max_token_entries=_int_env("MAX_TOKEN_ENTRIES", 30000, 1000, 200000),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        gcp_project_id=os.getenv("GCP_PROJECT_ID", "").strip(),
+        karaoke_bucket=os.getenv("KARAOKE_BUCKET", "").strip(),
+        karaoke_prefix=os.getenv("KARAOKE_PREFIX", "karaoke").strip().strip("/") or "karaoke",
+        karaoke_max_upload_bytes=_int_env(
+            "KARAOKE_MAX_UPLOAD_BYTES",
+            600 * 1024 * 1024,
+            1024 * 1024,
+            5 * 1024 * 1024 * 1024,
+        ),
+        karaoke_ffmpeg_timeout_seconds=_int_env(
+            "KARAOKE_FFMPEG_TIMEOUT_SECONDS", 3300, 60, 3500
+        ),
     )
 
 

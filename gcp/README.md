@@ -9,6 +9,16 @@
 
 4GTV 會限制雲端主機直接更新短期網址。若沒有 NAS 或電腦，請依 [iPhone 更新工具](https://roger9677gmail.github.io/tw-news-m3u/iphone-refresh.html) 設定 Scriptable；需要看新聞時先執行一次，iPhone 不必常駐。
 
+## 啟用 KTV MP4 管理
+
+在專案根目錄執行：
+
+```bash
+PROJECT_ID=你的專案ID REGION=asia-east1 bash gcp/setup-karaoke-storage.sh
+```
+
+這會建立禁止公開存取的 Cloud Storage bucket、授權 Cloud Run 執行帳號管理影片，並在 GitHub CLI 已登入時寫入 `KARAOKE_BUCKET` repository variable。Cloud Run 部署後，即可從管理頁上傳有使用權的 MP4，自動轉成 HLS 並加進途播的「KTV 點歌」群組。
+
 ## 需求
 
 - 一個已啟用計費的 Google Cloud Project。
@@ -90,9 +100,9 @@ GCP_RUNTIME_SERVICE_ACCOUNT
 ```text
 region: asia-east1
 port: 8080
-cpu: 1
-memory: 1Gi
-concurrency: 20
+cpu: 2
+memory: 4Gi
+concurrency: 4
 min-instances: 0
 max-instances: 1
 request timeout: 3600 seconds

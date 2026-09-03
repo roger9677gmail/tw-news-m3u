@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#11151c">
-  <meta name="description" content="把台灣新聞台官方公開直播轉成途播可匯入的固定 M3U 清單。">
+  <meta name="description" content="把台灣新聞直播與私人卡拉 OK 影片整理成途播可匯入的固定 M3U 清單。">
   <title>台灣新聞直播 M3U</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
@@ -47,6 +47,7 @@
       <div><strong id="count-total">–</strong><span>全部頻道</span></div>
       <div><strong id="count-online">–</strong><span>已解析</span></div>
       <div><strong id="count-error">–</strong><span>解析失敗</span></div>
+      <div><strong id="count-karaoke">–</strong><span>KTV 歌曲</span></div>
       <div><strong id="max-height">–</strong><span>最高畫質</span></div>
     </section>
 
@@ -62,6 +63,39 @@
       <div id="channel-grid" class="channel-grid" aria-busy="true"></div>
     </section>
 
+    <section id="karaoke-section" aria-labelledby="karaoke-title">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">KARAOKE</p>
+          <h2 id="karaoke-title">KTV 點歌管理</h2>
+        </div>
+        <button type="button" id="refresh-karaoke" class="quiet">重新整理</button>
+      </div>
+
+      <div class="panel karaoke-upload">
+        <label class="field">
+          <span>歌曲名稱</span>
+          <input id="karaoke-title-input" type="text" maxlength="120" placeholder="例如：歌手－歌名">
+        </label>
+        <label class="field">
+          <span>MP4 影片</span>
+          <input id="karaoke-file" type="file" accept="video/mp4,.mp4">
+        </label>
+        <label class="rights-check">
+          <input id="karaoke-rights" type="checkbox">
+          <span>我擁有此影片的使用與雲端上傳權利，只供自己的途播清單使用。</span>
+        </label>
+        <button type="button" id="upload-karaoke" class="primary">上傳並轉成 M3U8</button>
+        <div id="karaoke-progress-wrap" class="progress-wrap" hidden>
+          <progress id="karaoke-progress" max="100" value="0"></progress>
+          <span id="karaoke-progress-text">準備中…</span>
+        </div>
+        <p id="karaoke-notice" class="hint">請先輸入上方播放權杖。影片會存入私人 Cloud Storage，不會放進 GitHub。</p>
+      </div>
+
+      <div id="karaoke-grid" class="channel-grid karaoke-grid" aria-busy="false"></div>
+    </section>
+
     <section class="panel guide" aria-labelledby="guide-title">
       <p class="kicker">QUICK START</p>
       <h2 id="guide-title">使用方式</h2>
@@ -71,7 +105,7 @@
         <li>第一次點某個頻道時，Relay 會向官方行動直播服務取得當下的 HLS，通常只需幾秒。</li>
       </ol>
       <p class="safety"><strong>行車安全：</strong>請只在安全停車時操作與觀看影像；行駛中應以音訊為主並遵守當地法規。</p>
-      <p class="fine-print">本服務不保存影片、不破解 DRM，也不加入付費或私人來源。影像資料會從官方公開來源經 Cloud Run 轉送，因此可能產生 Google Cloud 對外流量費用。</p>
+      <p class="fine-print">新聞影像從官方公開來源轉送；自行上傳的卡拉 OK 影片會保存在私人 Cloud Storage。請只使用你有權使用的影片。播放與儲存可能產生 Google Cloud 費用。</p>
     </section>
 
     <footer>

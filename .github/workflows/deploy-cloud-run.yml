@@ -92,6 +92,10 @@ jobs:
             FOURGTV_CACHE_FILE=/var/secrets/fourgtv/streams.json
             FOURGTV_CACHE_SECRET=tw-news-fourgtv-streams
             GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}
+            KARAOKE_BUCKET=${{ vars.KARAOKE_BUCKET }}
+            KARAOKE_PREFIX=karaoke
+            KARAOKE_MAX_UPLOAD_BYTES=629145600
+            KARAOKE_FFMPEG_TIMEOUT_SECONDS=3300
           secrets_update_strategy: overwrite
           secrets: |-
             ACCESS_KEY=tw-news-access-key:latest
@@ -103,9 +107,9 @@ jobs:
             --default-url
             --ingress=all
             --port=8080
-            --cpu=1
-            --memory=1Gi
-            --concurrency=20
+            --cpu=2
+            --memory=4Gi
+            --concurrency=4
             --min-instances=0
             --max-instances=1
             --execution-environment=gen2

@@ -23,6 +23,13 @@ from .hls import (
     rewrite_hls_manifest,
     validate_upstream_url,
 )
+from .karaoke import (
+    DisabledKaraokeStore,
+    GCSKaraokeStore,
+    KaraokeError,
+    KaraokeSong,
+    KaraokeStore,
+)
 from .models import ResolvedStream
 from .resolver import ResolveError, YouTubeResolver
 
@@ -97,7 +104,13 @@ def _playlist_url(request: Request, settings: Settings, access_key: str) -> str:
     return _append_key(f"{_base_url(request, settings)}/live.m3u", access_key)
 
 
-def _m3u(channels: tuple[Channel, ...], request: Request, settings: Settings, access_key: str) -> str:
+def _m3u(
+    channels: tuple[Channel, ...],
+    request: Request,
+    settings: Settings,
+    access_key: str,
+    karaoke_songs: list[KaraokeSong] | None = None,
+) -> str:
     base = _base_url(request, settings)
     lines = [
         "#EXTM3U",
@@ -110,6 +123,16 @@ def _m3u(channels: tuple[Channel, ...], request: Request, settings: Settings, ac
         stream_url = _append_key(f"{base}/hls/{channel.id}/master.m3u8", access_key)
         lines.append(
             f'#EXTINF:-1 tvg-id="{channel_id}" group-title="{group}",{name}'
+        )
+        lines.append(stream_url)
+    for song in karaoke_songs or []:
+        name = song.title.replace("\n", " ").replace(",", "，")
+        stream_url = _append_key(
+            f"{base}/karaoke/{urllib.parse.quote(song.id, safe='')}/index.m3u8",
+            access_key,
+        )
+        lines.append(
+            f'#EXTINF:-1 tvg-id="ktv-{song.id}" group-title="KTV 點歌",{name}'
         )
         lines.append(stream_url)
     return "\n".join(lines) + "\n"
@@ -324,11 +347,25 @@ def create_app(
     channels: tuple[Channel, ...] | None = None,
     resolver: YouTubeResolver | None = None,
     http_client: httpx.AsyncClient | None = None,
+    karaoke_store: KaraokeStore | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     channels = channels or load_channels(settings.channels_path)
     resolver = resolver or YouTubeResolver(settings, channels)
     owns_client = http_client is None
+    karaoke_backend: KaraokeStore
+    if karaoke_store is not None:
+        karaoke_backend = karaoke_store
+    elif settings.karaoke_enabled:
+        karaoke_backend = GCSKaraokeStore(
+            bucket_name=settings.karaoke_bucket,
+            project_id=settings.gcp_project_id,
+            prefix=settings.karaoke_prefix,
+            max_upload_bytes=settings.karaoke_max_upload_bytes,
+            ffmpeg_timeout_seconds=settings.karaoke_ffmpeg_timeout_seconds,
+        )
+    else:
+        karaoke_backend = DisabledKaraokeStore()
 
     _configure_logging(settings.log_level)
 
@@ -337,6 +374,7 @@ def create_app(
         app.state.settings = settings
         app.state.channels = channels
         app.state.resolver = resolver
+        app.state.karaoke_store = karaoke_backend
         app.state.token_store = MediaTokenStore(
             ttl_seconds=settings.media_token_ttl_seconds,
             max_entries=settings.max_token_entries,
@@ -378,12 +416,21 @@ def create_app(
 
     @app.get("/api/config")
     async def api_config(request: Request) -> dict[str, Any]:
+        song_count = 0
+        if karaoke_backend.enabled:
+            try:
+                song_count = len(await karaoke_backend.list_songs())
+            except Exception:
+                LOGGER.exception("Unable to read karaoke catalog for config")
         return {
             "app_name": settings.app_name,
             "access_required": settings.access_required,
             "public_base_url": _base_url(request, settings),
             "max_height": settings.max_height,
             "channel_count": len(channels),
+            "karaoke_enabled": karaoke_backend.enabled,
+            "karaoke_song_count": song_count,
+            "karaoke_max_upload_bytes": settings.karaoke_max_upload_bytes,
         }
 
     @app.get("/api/status")
@@ -438,11 +485,75 @@ def create_app(
         count = len(cached_channels) if isinstance(cached_channels, dict) else 0
         return JSONResponse({"ok": True, "channels": count, "version": version})
 
+    @app.get("/api/karaoke/songs")
+    async def karaoke_songs(request: Request) -> dict[str, Any]:
+        _require_access(request, settings)
+        if not karaoke_backend.enabled:
+            return {"enabled": False, "songs": []}
+        try:
+            songs = await karaoke_backend.list_songs()
+        except KaraokeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"enabled": True, "songs": [song.as_dict() for song in songs]}
+
+    @app.post("/api/karaoke/uploads")
+    async def create_karaoke_upload(request: Request) -> JSONResponse:
+        _require_access(request, settings)
+        if not karaoke_backend.enabled:
+            raise HTTPException(status_code=503, detail="尚未啟用卡拉 OK 儲存空間")
+        try:
+            payload = await request.json()
+            if payload.get("rights_confirmed") is not True:
+                raise KaraokeError("請先確認你擁有影片的使用與上傳權利")
+            result = await karaoke_backend.create_upload(
+                file_name=str(payload.get("file_name") or ""),
+                size_bytes=int(payload.get("size_bytes") or 0),
+                origin=_base_url(request, settings),
+            )
+        except (KaraokeError, TypeError, ValueError) as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        return JSONResponse({"ok": True, **result})
+
+    @app.post("/api/karaoke/uploads/{upload_id}/complete")
+    async def complete_karaoke_upload(upload_id: str, request: Request) -> JSONResponse:
+        _require_access(request, settings)
+        if not karaoke_backend.enabled:
+            raise HTTPException(status_code=503, detail="尚未啟用卡拉 OK 儲存空間")
+        try:
+            payload = await request.json()
+            song = await karaoke_backend.complete_upload(
+                upload_id=upload_id,
+                title=str(payload.get("title") or ""),
+                file_name=str(payload.get("file_name") or ""),
+            )
+        except KaraokeError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        return JSONResponse({"ok": True, "song": song.as_dict()})
+
+    @app.delete("/api/karaoke/songs/{song_id}")
+    async def delete_karaoke_song(song_id: str, request: Request) -> JSONResponse:
+        _require_access(request, settings)
+        if not karaoke_backend.enabled:
+            raise HTTPException(status_code=503, detail="尚未啟用卡拉 OK 儲存空間")
+        try:
+            deleted = await karaoke_backend.delete_song(song_id)
+        except KaraokeError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        if not deleted:
+            raise HTTPException(status_code=404, detail="找不到歌曲")
+        return JSONResponse({"ok": True, "deleted": song_id})
+
     @app.api_route("/live.m3u", methods=["GET", "HEAD"])
     @app.api_route("/live.txt", methods=["GET", "HEAD"])
     async def live_playlist(request: Request) -> Response:
         key = _require_access(request, settings)
-        body = _m3u(channels, request, settings, key)
+        songs: list[KaraokeSong] = []
+        if karaoke_backend.enabled:
+            try:
+                songs = await karaoke_backend.list_songs()
+            except Exception:
+                LOGGER.exception("Unable to include karaoke catalog in playlist")
+        body = _m3u(channels, request, settings, key, songs)
         content = "" if request.method == "HEAD" else body
         return Response(
             content=content,
@@ -498,6 +609,48 @@ def create_app(
             url=fresh.stream_url,
             headers=fresh.headers,
             access_key=key,
+        )
+
+    @app.api_route(
+        "/karaoke/{song_id}/index.m3u8", methods=["GET", "HEAD"]
+    )
+    async def karaoke_manifest(song_id: str, request: Request) -> Response:
+        key = _require_access(request, settings)
+        if not karaoke_backend.enabled:
+            raise HTTPException(status_code=404, detail="卡拉 OK 功能未啟用")
+        try:
+            body, _ = await karaoke_backend.read_asset(song_id, "index.m3u8")
+            manifest = body.decode("utf-8")
+        except (KaraokeError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        base = _base_url(request, settings)
+        rewritten: list[str] = []
+        for line in manifest.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                asset = urllib.parse.quote(Path(stripped).name, safe="")
+                stripped = _append_key(f"{base}/karaoke/{song_id}/{asset}", key)
+            rewritten.append(stripped if stripped else line)
+        content = "" if request.method == "HEAD" else "\n".join(rewritten) + "\n"
+        return Response(
+            content=content,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "private, max-age=60"},
+        )
+
+    @app.api_route("/karaoke/{song_id}/{asset_name}", methods=["GET", "HEAD"])
+    async def karaoke_asset(song_id: str, asset_name: str, request: Request) -> Response:
+        _require_access(request, settings)
+        if not karaoke_backend.enabled:
+            raise HTTPException(status_code=404, detail="卡拉 OK 功能未啟用")
+        try:
+            body, content_type = await karaoke_backend.read_asset(song_id, asset_name)
+        except KaraokeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(
+            content=b"" if request.method == "HEAD" else body,
+            media_type=content_type,
+            headers={"Cache-Control": "private, max-age=86400"},
         )
 
     @app.api_route("/media/{channel_id}/{token}", methods=["GET", "HEAD"])

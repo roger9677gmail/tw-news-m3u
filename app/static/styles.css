@@ -142,7 +142,7 @@ h2 { margin: 0; font-size: clamp(1.45rem, 3vw, 2.05rem); letter-spacing: -.03em;
 
 .summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   margin: 24px 0 50px;
@@ -185,6 +185,23 @@ h2 { margin: 0; font-size: clamp(1.45rem, 3vw, 2.05rem); letter-spacing: -.03em;
 .channel-card h3 { margin: 0; font-size: 1.08rem; }
 .channel-card p { margin: 7px 0 0; color: var(--muted); font-size: .84rem; line-height: 1.5; overflow-wrap: anywhere; }
 .channel-card .probe { min-width: 72px; padding-inline: .8rem; }
+.karaoke-upload { margin-bottom: 18px; }
+.karaoke-upload .field + .field { margin-top: 14px; }
+.karaoke-upload input[type="file"] { padding: 11px; }
+.rights-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 16px 0;
+  color: var(--muted);
+  font-size: .88rem;
+  line-height: 1.55;
+}
+.rights-check input { width: 19px; height: 19px; margin-top: 1px; accent-color: var(--accent); }
+.progress-wrap { display: grid; gap: 8px; margin-top: 16px; color: var(--muted); font-size: .84rem; }
+.progress-wrap progress { width: 100%; height: 10px; accent-color: var(--accent); }
+.karaoke-grid { margin-top: 14px; }
+.karaoke-card .delete-song { min-width: 72px; padding-inline: .8rem; color: #ffc8cc; }
 .notice {
   margin: 0 0 16px;
   padding: 14px 16px;
@@ -235,4 +252,5 @@ footer a { color: var(--accent); }
   .actions { display: grid; grid-template-columns: 1fr; }
   .channel-card { grid-template-columns: auto minmax(0, 1fr); }
   .channel-card .probe { grid-column: 2; justify-self: start; }
+  .karaoke-card .delete-song { grid-column: 2; justify-self: start; }
 }

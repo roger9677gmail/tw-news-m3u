@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.config import Channel, Settings
+from app.karaoke import KaraokeSong
 from app.main import create_app
 
 
@@ -209,3 +210,119 @@ def test_direct_tubo_import_uses_custom_app_scheme(tmp_path: Path) -> None:
         query = urllib.parse.parse_qs(parsed.query)
         assert query["url"] == ["https://relay.example/live.m3u?key=test-secret"]
         assert query["name"] == ["測試新聞 M3U"]
+
+
+def test_karaoke_upload_playlist_playback_and_delete(tmp_path: Path) -> None:
+    class FakeKaraokeStore:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.songs: list[KaraokeSong] = []
+
+        async def list_songs(self) -> list[KaraokeSong]:
+            return list(self.songs)
+
+        async def create_upload(
+            self, *, file_name: str, size_bytes: int, origin: str
+        ) -> dict[str, str]:
+            assert file_name == "sample.mp4"
+            assert size_bytes == 1234
+            assert origin == "https://relay.example"
+            return {
+                "upload_id": "a" * 24,
+                "upload_url": "https://storage.example/upload/session",
+            }
+
+        async def complete_upload(
+            self, *, upload_id: str, title: str, file_name: str
+        ) -> KaraokeSong:
+            assert upload_id == "a" * 24
+            song = KaraokeSong(
+                id=upload_id,
+                title=title,
+                original_file=file_name,
+                size_bytes=1234,
+                created_at="2026-09-03T12:00:00+00:00",
+            )
+            self.songs = [song]
+            return song
+
+        async def delete_song(self, song_id: str) -> bool:
+            before = len(self.songs)
+            self.songs = [song for song in self.songs if song.id != song_id]
+            return len(self.songs) != before
+
+        async def read_asset(
+            self, song_id: str, asset_name: str
+        ) -> tuple[bytes, str]:
+            assert song_id == "a" * 24
+            if asset_name == "index.m3u8":
+                return (
+                    b"#EXTM3U\n#EXTINF:6.0,\nsegment-00000.ts\n#EXT-X-ENDLIST\n",
+                    "application/vnd.apple.mpegurl",
+                )
+            assert asset_name == "segment-00000.ts"
+            return b"fake-karaoke-segment", "video/mp2t"
+
+    store = FakeKaraokeStore()
+    app = create_app(
+        settings=settings(tmp_path),
+        channels=channels(),
+        karaoke_store=store,
+    )
+    with TestClient(app) as client:
+        assert client.get("/api/karaoke/songs").status_code == 401
+
+        rights_missing = client.post(
+            "/api/karaoke/uploads?key=test-secret",
+            json={"file_name": "sample.mp4", "size_bytes": 1234},
+        )
+        assert rights_missing.status_code == 400
+
+        upload = client.post(
+            "/api/karaoke/uploads?key=test-secret",
+            json={
+                "file_name": "sample.mp4",
+                "size_bytes": 1234,
+                "rights_confirmed": True,
+            },
+        )
+        assert upload.status_code == 200
+        assert upload.json()["upload_id"] == "a" * 24
+
+        completed = client.post(
+            f"/api/karaoke/uploads/{'a' * 24}/complete?key=test-secret",
+            json={"title": "KTV 系統測試", "file_name": "sample.mp4"},
+        )
+        assert completed.status_code == 200
+        assert completed.json()["song"]["title"] == "KTV 系統測試"
+
+        playlist = client.get("/live.m3u?key=test-secret")
+        assert 'group-title="KTV 點歌"' in playlist.text
+        assert (
+            f"https://relay.example/karaoke/{'a' * 24}/index.m3u8?key=test-secret"
+            in playlist.text
+        )
+
+        manifest = client.get(
+            f"/karaoke/{'a' * 24}/index.m3u8?key=test-secret"
+        )
+        assert manifest.status_code == 200
+        assert "segment-00000.ts" in manifest.text
+        assert (
+            f"https://relay.example/karaoke/{'a' * 24}/segment-00000.ts?key=test-secret"
+            in manifest.text
+        )
+
+        segment = client.get(
+            f"/karaoke/{'a' * 24}/segment-00000.ts?key=test-secret"
+        )
+        assert segment.status_code == 200
+        assert segment.content == b"fake-karaoke-segment"
+        assert segment.headers["content-type"].startswith("video/mp2t")
+
+        deleted = client.delete(
+            f"/api/karaoke/songs/{'a' * 24}?key=test-secret"
+        )
+        assert deleted.status_code == 200
+        assert store.songs == []

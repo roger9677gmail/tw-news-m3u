@@ -31,6 +31,7 @@ if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
   read -r -p "Google Cloud Project ID: " PROJECT_ID
 fi
 [[ -n "$PROJECT_ID" ]] || fail "必須提供 Google Cloud Project ID。"
+KARAOKE_BUCKET="${KARAOKE_BUCKET:-${PROJECT_ID}-karaoke}"
 
 gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1 \
   || fail "找不到專案 $PROJECT_ID，請先建立專案並啟用計費。"
@@ -125,6 +126,10 @@ gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
   --project "$PROJECT_ID" \
   --quiet >/dev/null
 
+log "建立私人 KTV 影片儲存空間"
+PROJECT_ID="$PROJECT_ID" REGION="$REGION" RUNTIME_SA_NAME="$RUNTIME_SA_NAME" \
+  KARAOKE_BUCKET="$KARAOKE_BUCKET" bash gcp/setup-karaoke-storage.sh
+
 log "建置並部署到 Cloud Run 台灣區域 ${REGION}"
 gcloud run deploy "$SERVICE" \
   --source . \
@@ -138,16 +143,16 @@ gcloud run deploy "$SERVICE" \
   --ingress all \
   --service-account "$RUNTIME_SA" \
   --port 8080 \
-  --cpu 1 \
-  --memory 1Gi \
-  --concurrency 20 \
+  --cpu 2 \
+  --memory 4Gi \
+  --concurrency 4 \
   --min-instances 0 \
   --max-instances 1 \
   --timeout 3600 \
   --execution-environment gen2 \
   --cpu-boost \
   --set-secrets="ACCESS_KEY=${SECRET_NAME}:latest" \
-  --set-env-vars="APP_NAME=台灣新聞直播 M3U,MAX_HEIGHT=720,RESOLVER_TTL_SECONDS=900,RESOLVER_FAILURE_TTL_SECONDS=90,RESOLVER_TIMEOUT_SECONDS=100,MAX_RESOLVER_CONCURRENCY=2,MEDIA_TOKEN_TTL_SECONDS=21600,MAX_TOKEN_ENTRIES=30000,UPSTREAM_TIMEOUT_SECONDS=25,LOG_LEVEL=INFO,TZ=Asia/Taipei" \
+  --set-env-vars="APP_NAME=台灣新聞直播 M3U,MAX_HEIGHT=720,RESOLVER_TTL_SECONDS=900,RESOLVER_FAILURE_TTL_SECONDS=90,RESOLVER_TIMEOUT_SECONDS=100,MAX_RESOLVER_CONCURRENCY=2,MEDIA_TOKEN_TTL_SECONDS=21600,MAX_TOKEN_ENTRIES=30000,UPSTREAM_TIMEOUT_SECONDS=25,LOG_LEVEL=INFO,TZ=Asia/Taipei,GCP_PROJECT_ID=${PROJECT_ID},KARAOKE_BUCKET=${KARAOKE_BUCKET},KARAOKE_PREFIX=karaoke,KARAOKE_MAX_UPLOAD_BYTES=629145600,KARAOKE_FFMPEG_TIMEOUT_SECONDS=3300" \
   --quiet
 
 PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$SERVICE" \

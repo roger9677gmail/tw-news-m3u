@@ -146,6 +146,17 @@ http://NAS區網IP:8787/live.m3u?key=你的存取密碼
 
 > 完整 M3U 網址含有專用播放權杖，請勿公開貼到社群、Issue 或公開網頁。
 
+## KTV 點歌（Cloud Run）
+
+Cloud Run 版的管理頁可從 iPhone「檔案」選擇 Google Drive 裡的 MP4，上傳後自動轉成 720p HLS，並加入同一份途播清單的「KTV 點歌」群組。
+
+1. 先執行 `gcp/setup-karaoke-storage.sh` 建立私人 Cloud Storage bucket。
+2. 打開 Cloud Run 管理頁，輸入播放權杖。
+3. 填寫歌曲名稱、選擇 MP4，勾選使用權確認後上傳。
+4. 等到顯示完成，再到途播重新整理遠端清單。
+
+影片會存在私人 Cloud Storage，不會放進 GitHub。從管理頁刪除歌曲時，目錄記錄、M3U8 和所有 TS 分段會一起刪除。單檔上限預設為 600 MB；只能上傳你有權使用與儲存的影片。
+
 ### 離開家中後要在車上使用
 
 區網 IP 只在家中 Wi-Fi 有效。車外使用時，需要讓 iPhone 能安全連回 NAS，常見做法有：
@@ -183,6 +194,9 @@ docker compose up -d
 | `MEDIA_TOKEN_TTL_SECONDS` | `21600` | 內部媒體權杖有效時間 |
 | `UPSTREAM_TIMEOUT_SECONDS` | `25` | 上游連線逾時 |
 | `LOG_LEVEL` | `INFO` | 日誌層級 |
+| `GCP_PROJECT_ID` | 空白 | KTV 儲存所屬的 Google Cloud Project |
+| `KARAOKE_BUCKET` | 空白 | 私人 Cloud Storage bucket；空白時關閉 KTV 功能 |
+| `KARAOKE_MAX_UPLOAD_BYTES` | `629145600` | MP4 單檔上限（預設 600 MB） |
 
 ## 運作方式
 
@@ -267,7 +281,7 @@ docker compose up -d --build
 
 - 僅加入內容提供者公開發布的直播來源。
 - 不處理付費、私人、DRM 或需要竊取憑證的內容。
-- 不保存、錄製或重新編碼影音。
+- 新聞串流不保存或錄製；只有使用者主動上傳的 KTV MP4 會轉碼並保存在私人 Cloud Storage。
 - `ACCESS_KEY` 會出現在 M3U 網址中，因此它只能是本服務專用權杖，不可重複使用 NAS、Google 或其他帳號密碼。Uvicorn access log 已預設關閉；外部連線仍應使用 HTTPS。
 - 所有影音都經過 NAS，會消耗 NAS 的下載與上傳頻寬。
 - 請只在安全停車時操作與觀看影像，並遵守所在地法規。
