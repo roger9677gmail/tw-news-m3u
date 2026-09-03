@@ -1,0 +1,201 @@
+name: Diagnose Cloud Run live playback
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/diagnose-live-playback.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: diagnose-cloud-run-live-playback
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    if: >-
+      ${{ vars.GCP_PROJECT_ID != '' &&
+          vars.GCP_REGION != '' &&
+          vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' &&
+          vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' &&
+          vars.GCP_RUNTIME_SERVICE_ACCOUNT != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PROD_SERVICE: tw-news-m3u
+
+    steps:
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Test YouTube resolution and first HLS requests from Cloud Run
+        shell: bash
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          RUNTIME_SA: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+        run: |
+          set -Eeuo pipefail
+
+          DIAG_SERVICE="tw-news-diag-${GITHUB_RUN_ID}"
+          ACCESS_KEY="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
+          PY
+          )"
+          echo "::add-mask::$ACCESS_KEY"
+
+          cleanup() {
+            gcloud run services delete "$DIAG_SERVICE" \
+              --project "$PROJECT_ID" \
+              --region "$REGION" \
+              --quiet >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          IMAGE="$(gcloud run services describe "$PROD_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(spec.template.spec.containers[0].image)')"
+
+          if [[ -z "$IMAGE" ]]; then
+            echo "Unable to find the production image."
+            exit 1
+          fi
+
+          echo "Production image: ${IMAGE%%@*}@<digest>"
+          echo "Creating isolated diagnostic service: $DIAG_SERVICE"
+
+          gcloud run deploy "$DIAG_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --image "$IMAGE" \
+            --service-account "$RUNTIME_SA" \
+            --port 8080 \
+            --cpu 1 \
+            --memory 1Gi \
+            --concurrency 1 \
+            --min-instances 0 \
+            --max-instances 1 \
+            --timeout 300 \
+            --execution-environment gen2 \
+            --ingress all \
+            --no-invoker-iam-check \
+            --no-iap \
+            --default-url \
+            --set-env-vars "ACCESS_KEY=${ACCESS_KEY},MAX_HEIGHT=480,RESOLVER_TIMEOUT_SECONDS=100,MAX_RESOLVER_CONCURRENCY=1,RESOLVER_FAILURE_TTL_SECONDS=10,UPSTREAM_TIMEOUT_SECONDS=30,LOG_LEVEL=INFO,TZ=Asia/Taipei" \
+            --quiet
+
+          SERVICE_URL="$(gcloud run services describe "$DIAG_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --format='value(status.url)')"
+          echo "Diagnostic URL: $SERVICE_URL"
+
+          echo
+          echo "=== Application readiness ==="
+          CONFIG_CODE="$(curl --silent --show-error --retry 8 --retry-delay 3 \
+            --connect-timeout 10 --max-time 30 \
+            --output /tmp/config.json --write-out '%{http_code}' \
+            "$SERVICE_URL/api/config" || true)"
+          echo "GET /api/config -> HTTP $CONFIG_CODE"
+          cat /tmp/config.json 2>/dev/null || true
+          echo
+
+          echo
+          echo "=== TVBS resolver probe ==="
+          PROBE_CODE="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 140 \
+            --request POST \
+            --header "X-Access-Key: $ACCESS_KEY" \
+            --output /tmp/probe.json --write-out '%{http_code}' \
+            "$SERVICE_URL/api/channels/tvbs-news/probe" || true)"
+          echo "POST /api/channels/tvbs-news/probe -> HTTP $PROBE_CODE"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/tmp/probe.json')
+          text = path.read_text(encoding='utf-8', errors='replace') if path.exists() else ''
+          try:
+              data = json.loads(text)
+          except Exception:
+              print(text[:5000])
+          else:
+              for key in ('key', 'access_key', 'stream_url', 'url'):
+                  data.pop(key, None)
+              print(json.dumps(data, ensure_ascii=False, indent=2)[:8000])
+          PY
+
+          if [[ "$PROBE_CODE" != "200" ]]; then
+            echo
+            echo "RESULT: resolver_failed"
+            exit 0
+          fi
+
+          echo
+          echo "=== HLS master playlist ==="
+          MASTER_CODE="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 90 \
+            --header "X-Access-Key: $ACCESS_KEY" \
+            --dump-header /tmp/master.headers \
+            --output /tmp/master.m3u8 --write-out '%{http_code}' \
+            "$SERVICE_URL/hls/tvbs-news/master.m3u8" || true)"
+          echo "GET master.m3u8 -> HTTP $MASTER_CODE"
+          grep -Ei '^(content-type|content-length|content-range|accept-ranges|cache-control):' /tmp/master.headers || true
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/master.m3u8').read_text(encoding='utf-8', errors='replace') if Path('/tmp/master.m3u8').exists() else ''
+          print('Manifest marker:', text.lstrip().startswith('#EXTM3U'))
+          print('Manifest lines:', len(text.splitlines()))
+          PY
+
+          if [[ "$MASTER_CODE" != "200" ]]; then
+            echo "RESULT: master_playlist_failed"
+            exit 0
+          fi
+
+          FIRST_URL="$(python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/master.m3u8').read_text(encoding='utf-8', errors='replace')
+          for line in text.splitlines():
+              line = line.strip()
+              if line and not line.startswith('#'):
+                  print(line)
+                  break
+          PY
+          )"
+
+          if [[ -z "$FIRST_URL" ]]; then
+            echo "RESULT: no_child_or_segment_url"
+            exit 0
+          fi
+
+          echo
+          echo "=== First referenced HLS object ==="
+          CHILD_CODE="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 90 \
+            --range 0-131071 \
+            --dump-header /tmp/child.headers \
+            --output /tmp/child.body --write-out '%{http_code}' \
+            "$FIRST_URL" || true)"
+          echo "GET first referenced object -> HTTP $CHILD_CODE"
+          grep -Ei '^(content-type|content-length|content-range|accept-ranges|cache-control):' /tmp/child.headers || true
+          echo "Downloaded bytes: $(wc -c </tmp/child.body 2>/dev/null || echo 0)"
+
+          if [[ "$CHILD_CODE" == "200" || "$CHILD_CODE" == "206" ]]; then
+            echo "RESULT: end_to_end_first_object_ok"
+          else
+            echo "RESULT: first_referenced_object_failed"
+          fi
