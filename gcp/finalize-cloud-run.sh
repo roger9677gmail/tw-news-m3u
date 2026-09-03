@@ -2,9 +2,8 @@
 set -Eeuo pipefail
 
 # Finish a Cloud Run deployment that has already created the service.
-# It waits for the public route to become available, verifies the FastAPI
-# health endpoint, reads the playlist access key from Secret Manager, and
-# writes the complete Tubo M3U URL to a private file in Cloud Shell.
+# This version also repairs common Cloud Run 404 causes before checking the app:
+# disabled run.app URL, restricted ingress, or missing public invocation access.
 
 REGION="${REGION:-asia-east1}"
 SERVICE="${SERVICE:-tw-news-m3u}"
@@ -28,27 +27,61 @@ command -v python3 >/dev/null 2>&1 || fail "找不到 python3。"
 
 gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1 \
   || fail "目前帳號無法存取專案：${PROJECT_ID}"
+gcloud config set project "$PROJECT_ID" >/dev/null
+
+gcloud run services describe "$SERVICE" \
+  --project "$PROJECT_ID" \
+  --region "$REGION" >/dev/null 2>&1 \
+  || fail "找不到 Cloud Run 服務 ${SERVICE}（${PROJECT_ID}/${REGION}）。"
+
+log "修復 Cloud Run 公開網址與 ingress"
+gcloud run services update "$SERVICE" \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --ingress=all \
+  --default-url \
+  --quiet >/dev/null
+
+# Tubo cannot attach a Google identity token, so the service must accept public
+# requests. The application itself still protects playlists with ACCESS_KEY.
+if ! gcloud run services add-iam-policy-binding "$SERVICE" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --member="allUsers" \
+    --role="roles/run.invoker" \
+    --condition=None \
+    --quiet >/dev/null 2>&1; then
+  log "IAM 公開綁定未成功，改用停用 Invoker IAM 檢查"
+  gcloud run services update "$SERVICE" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --no-invoker-iam-check \
+    --quiet >/dev/null \
+    || fail "Google Cloud 組織政策不允許公開 Cloud Run；途播將無法直接連線。"
+fi
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --format='value(status.url)' 2>/dev/null || true)"
-[[ -n "$SERVICE_URL" ]] || fail "找不到 Cloud Run 服務 ${SERVICE}（${PROJECT_ID}/${REGION}）。"
+[[ -n "$SERVICE_URL" ]] || fail "Cloud Run 沒有回傳服務網址。"
 
 TMP_BODY="$(mktemp)"
-trap 'rm -f "$TMP_BODY"' EXIT
+TMP_HEADERS="$(mktemp)"
+trap 'rm -f "$TMP_BODY" "$TMP_HEADERS"' EXIT
 HEALTH_URL="${SERVICE_URL}/healthz"
 HTTP_CODE=""
 HEALTH_OK=false
 
 log "確認 Cloud Run 公開路由與應用程式"
-for attempt in $(seq 1 30); do
+for attempt in $(seq 1 20); do
   HTTP_CODE="$(curl \
     --silent \
     --show-error \
     --location \
     --connect-timeout 10 \
     --max-time 30 \
+    --dump-header "$TMP_HEADERS" \
     --output "$TMP_BODY" \
     --write-out '%{http_code}' \
     "$HEALTH_URL" 2>/dev/null || true)"
@@ -63,13 +96,23 @@ for attempt in $(seq 1 30); do
 done
 
 if [[ "$HEALTH_OK" != "true" ]]; then
-  printf '\n最後回應：HTTP %s\n' "${HTTP_CODE:-連線失敗}" >&2
-  sed -n '1,20p' "$TMP_BODY" >&2 || true
+  printf '\n最後回應標頭：\n' >&2
+  sed -n '1,30p' "$TMP_HEADERS" >&2 || true
+  printf '\n最後回應內容（HTTP %s）：\n' "${HTTP_CODE:-連線失敗}" >&2
+  sed -n '1,30p' "$TMP_BODY" >&2 || true
+
+  printf '\nCloud Run 有效設定：\n' >&2
+  gcloud run services describe "$SERVICE" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --format='yaml(metadata.name,status.url,status.conditions,spec.template.spec.containers,spec.traffic)' >&2 || true
+
   printf '\n最近的 Cloud Run 記錄：\n' >&2
   gcloud run services logs read "$SERVICE" \
     --project "$PROJECT_ID" \
     --region "$REGION" \
-    --limit 80 >&2 || true
+    --limit 100 >&2 || true
+
   fail "服務已部署，但 /healthz 仍未通過。"
 fi
 
