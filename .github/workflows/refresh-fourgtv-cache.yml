@@ -2,6 +2,10 @@ name: Refresh 4GTV stream cache
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/refresh-fourgtv-cache.yml"
 
 permissions:
   contents: read
@@ -15,10 +19,12 @@ jobs:
   refresh:
     if: >-
       ${{ vars.GCP_PROJECT_ID != '' &&
+          vars.GCP_REGION != '' &&
           vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' &&
-          vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' }}
+          vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' &&
+          vars.GCP_RUNTIME_SERVICE_ACCOUNT != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -34,25 +40,167 @@ jobs:
         run: python -m pip install "curl-cffi>=0.16,<0.17" "pycryptodomex>=3.20,<4.0"
 
       - name: Authenticate to Google Cloud
+        id: auth
         uses: google-github-actions/auth@v3
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
 
       - name: Set up Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Resolve official streams and save a new secret version
+      - name: Resolve fresh official streams and test them on the generator network
+        id: generate
         shell: bash
         run: |
+          set -Eeuo pipefail
           cache_file="$RUNNER_TEMP/fourgtv-streams.json"
           python scripts/refresh_fourgtv_cache.py --output "$cache_file"
+
+          CACHE_FILE="$cache_file" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from curl_cffi import requests
+
+          payload = json.loads(Path(os.environ['CACHE_FILE']).read_text(encoding='utf-8'))
+          headers = {
+              'User-Agent': '%E5%9B%9B%E5%AD%A3%E7%B7%9A%E4%B8%8A/1 CFNetwork/1568.200.51 Darwin/24.1.0',
+              'Accept': '*/*',
+          }
+          results = []
+          for channel, entry in (payload.get('channels') or {}).items():
+              url = entry['url']
+              try:
+                  response = requests.get(
+                      url,
+                      headers=headers,
+                      timeout=30,
+                      impersonate='safari_ios',
+                  )
+                  body = response.content[:262144]
+                  result = {
+                      'channel': channel,
+                      'http': response.status_code,
+                      'content_type': response.headers.get('content-type', ''),
+                      'bytes': len(body),
+                      'is_manifest': body.lstrip().startswith(b'#EXTM3U'),
+                      'preview_hex': body[:16].hex(),
+                  }
+              except Exception as exc:
+                  result = {
+                      'channel': channel,
+                      'http': 0,
+                      'error': f'{type(exc).__name__}: {exc}'[:500],
+                  }
+              results.append(result)
+              print(json.dumps(result, ensure_ascii=False))
+
+          good = sum(item.get('http') == 200 and item.get('is_manifest') for item in results)
+          print('GENERATOR_NETWORK_SUMMARY', json.dumps({
+              'total': len(results),
+              'playable_manifests': good,
+              'failed': len(results) - good,
+          }, ensure_ascii=False))
+          if good == 0:
+              raise SystemExit('Fresh 4GTV URLs are not usable even from the generator network')
+          PY
+
           gcloud secrets versions add tw-news-fourgtv-streams \
             --project "${{ vars.GCP_PROJECT_ID }}" \
             --data-file "$cache_file"
+          echo "cache_file=$cache_file" >> "$GITHUB_OUTPUT"
+
+      - name: Test the newly generated cache from Cloud Run egress
+        shell: bash
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          RUNTIME_SA: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+        run: |
+          set -Eeuo pipefail
+          DIAG_SERVICE="tw-news-cache-diag-${GITHUB_RUN_ID}"
+          ACCESS_KEY="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
+          PY
+          )"
+          echo "::add-mask::$ACCESS_KEY"
+
+          cleanup() {
+            gcloud run services delete "$DIAG_SERVICE" \
+              --project "$PROJECT_ID" --region "$REGION" \
+              --quiet >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          IMAGE="$(gcloud run services describe tw-news-m3u \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --format='value(spec.template.spec.containers[0].image)')"
+
+          gcloud run deploy "$DIAG_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --image "$IMAGE" \
+            --service-account "$RUNTIME_SA" \
+            --port 8080 \
+            --cpu 1 \
+            --memory 2Gi \
+            --concurrency 2 \
+            --min-instances 0 \
+            --max-instances 1 \
+            --timeout 300 \
+            --execution-environment gen2 \
+            --ingress all \
+            --no-invoker-iam-check \
+            --no-iap \
+            --default-url \
+            --set-secrets "/var/secrets/fourgtv/streams.json=tw-news-fourgtv-streams:latest" \
+            --set-env-vars "ACCESS_KEY=${ACCESS_KEY},FOURGTV_CACHE_FILE=/var/secrets/fourgtv/streams.json,RESOLVER_TIMEOUT_SECONDS=45,MAX_RESOLVER_CONCURRENCY=2,UPSTREAM_TIMEOUT_SECONDS=30,LOG_LEVEL=INFO,TZ=Asia/Taipei" \
+            --quiet
+
+          SERVICE_URL="$(gcloud run services describe "$DIAG_SERVICE" \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --format='value(status.url)')"
+          curl --fail --silent --show-error --retry 8 --retry-delay 3 \
+            "$SERVICE_URL/api/config" >/dev/null
+
+          PROBE_CODE="$(curl --silent --show-error --max-time 90 \
+            --request POST --header "X-Access-Key: $ACCESS_KEY" \
+            --output /tmp/probe.json --write-out '%{http_code}' \
+            "$SERVICE_URL/api/channels/tvbs-news/probe" || true)"
+          echo "CLOUD_RUN_PROBE_HTTP=$PROBE_CODE"
+          cat /tmp/probe.json
+          echo
+
+          MASTER_CODE="$(curl --silent --show-error --max-time 90 \
+            --header "X-Access-Key: $ACCESS_KEY" \
+            --dump-header /tmp/master.headers \
+            --output /tmp/master.body --write-out '%{http_code}' \
+            "$SERVICE_URL/hls/tvbs-news/master.m3u8" || true)"
+          echo "CLOUD_RUN_MASTER_HTTP=$MASTER_CODE"
+          grep -Ei '^(content-type|content-length):' /tmp/master.headers || true
+          python3 - <<'PY'
+          from pathlib import Path
+          body = Path('/tmp/master.body').read_bytes()
+          print('CLOUD_RUN_MASTER_BYTES=' + str(len(body)))
+          print('CLOUD_RUN_MASTER_IS_M3U=' + str(body.lstrip().startswith(b'#EXTM3U')))
+          print('CLOUD_RUN_MASTER_PREVIEW_HEX=' + body[:16].hex())
+          PY
+
+          if [[ "$PROBE_CODE" == "200" && "$MASTER_CODE" == "200" ]] \
+             && grep -q '^#EXTM3U' /tmp/master.body; then
+            echo "CROSS_NETWORK_RESULT=playable"
+          elif [[ "$PROBE_CODE" == "200" ]]; then
+            echo "CROSS_NETWORK_RESULT=fresh_url_resolves_but_cloud_run_cdn_fetch_fails"
+          else
+            echo "CROSS_NETWORK_RESULT=cloud_run_resolution_failed"
+          fi
 
       - name: Destroy obsolete cache versions
+        if: always()
         shell: bash
         run: |
           mapfile -t versions < <(gcloud secrets versions list tw-news-fourgtv-streams \
