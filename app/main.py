@@ -294,6 +294,7 @@ async def _proxy_response(
             proxy_url=lambda cid, token: _proxy_media_url(
                 base, access_key, cid, token
             ),
+            max_height=settings.max_height,
         )
         if request.method == "HEAD":
             rewritten = b""

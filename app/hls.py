@@ -16,6 +16,7 @@ ALLOWED_HOST_SUFFIXES = (
     "googleusercontent.com",
 )
 URI_ATTRIBUTE_RE = re.compile(r'(?P<prefix>\bURI=)(?P<quote>["\'])(?P<uri>.*?)(?P=quote)')
+RESOLUTION_HEIGHT_RE = re.compile(r"(?:^|,)RESOLUTION=\d+x(?P<height>\d+)(?:,|$)")
 
 
 class UnsafeUpstreamURL(ValueError):
@@ -185,12 +186,19 @@ def rewrite_hls_manifest(
     headers: Mapping[str, str],
     token_store: MediaTokenStore,
     proxy_url: Callable[[str, str], str],
+    max_height: int | None = None,
 ) -> bytes:
     text = body.decode("utf-8", errors="replace")
     output: list[str] = []
+    skip_variant_uri = False
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
+        if skip_variant_uri:
+            if not line or line.startswith("#"):
+                continue
+            skip_variant_uri = False
+            continue
         if not line:
             output.append("")
             continue
@@ -206,6 +214,16 @@ def rewrite_hls_manifest(
                 )
             )
             continue
+
+        if max_height and line.startswith("#EXT-X-STREAM-INF:"):
+            match = RESOLUTION_HEIGHT_RE.search(line)
+            if match and int(match.group("height")) > max_height:
+                skip_variant_uri = True
+                continue
+        if max_height and line.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
+            match = RESOLUTION_HEIGHT_RE.search(line)
+            if match and int(match.group("height")) > max_height:
+                continue
 
         def replace_attribute(match: re.Match[str]) -> str:
             rewritten = _rewrite_uri(

@@ -70,3 +70,29 @@ def test_rewrite_manifest_does_not_proxy_untrusted_host() -> None:
     ).decode()
     assert "https://evil.example/segment.ts" in rewritten
     assert len(store) == 0
+
+
+def test_rewrite_master_manifest_limits_video_height_but_keeps_audio() -> None:
+    manifest = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="audio"
+video-720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio"
+video-1080.m3u8
+"""
+    store = MediaTokenStore(ttl_seconds=600)
+    rewritten = rewrite_hls_manifest(
+        manifest,
+        manifest_url="https://manifest.googlevideo.com/master.m3u8",
+        channel_id="news",
+        headers={},
+        token_store=store,
+        proxy_url=lambda channel, token: f"/media/{channel}/{token}",
+        max_height=720,
+    ).decode()
+
+    assert "RESOLUTION=1280x720" in rewritten
+    assert "RESOLUTION=1920x1080" not in rewritten
+    assert "video-720.m3u8" not in rewritten
+    assert "video-1080.m3u8" not in rewritten
+    assert rewritten.count("/media/news/") == 2

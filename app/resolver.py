@@ -40,7 +40,14 @@ def _clean_error(value: str, limit: int = 650) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     compact = " | ".join(lines[-6:])
     compact = compact.replace("\r", " ").replace("\n", " ")
-    return compact[-limit:] or "未知錯誤"
+    if len(compact) > limit:
+        # Keep both the extractor's reason at the start and its remediation at
+        # the end. Keeping only the suffix used to hide errors such as
+        # "Sign in to confirm you're not a bot" behind the cookie help URL.
+        head = max(1, (limit - 5) // 2)
+        tail = max(1, limit - head - 5)
+        compact = f"{compact[:head]} ... {compact[-tail:]}"
+    return compact or "未知錯誤"
 
 
 def _last_json_object(stdout: str) -> dict[str, Any]:
@@ -58,7 +65,11 @@ def _last_json_object(stdout: str) -> dict[str, Any]:
 
 
 def _selected_stream(info: dict[str, Any]) -> tuple[str | None, str, int | None]:
-    url = info.get("url")
+    # YouTube live formats normally expose video and audio as separate media
+    # playlists. The common manifest_url is the HLS master playlist that ties
+    # them together; proxying the selected variant URL would lose audio.
+    manifest_url = info.get("manifest_url")
+    url = manifest_url if isinstance(manifest_url, str) else info.get("url")
     protocol = str(info.get("protocol") or "")
     height = info.get("height")
 
@@ -149,7 +160,7 @@ class YouTubeResolver:
             deadline = loop.time() + self.settings.resolver_timeout_seconds
 
             for source in channel.sources:
-                for profile in ("default", "web_safari"):
+                for profile in ("mweb", "web_safari", "default"):
                     remaining = deadline - loop.time()
                     if remaining <= 1:
                         errors.append("已達整體解析逾時")
@@ -200,10 +211,8 @@ class YouTubeResolver:
     def _command(self, source: str, profile: str) -> list[str]:
         max_height = self.settings.max_height
         selector = (
-            f"best[protocol^=m3u8][vcodec!=none][acodec!=none][height<={max_height}]/"
-            f"best[protocol^=m3u8][height<={max_height}]/"
-            "worst[protocol^=m3u8][vcodec!=none][acodec!=none]/"
-            "worst[protocol^=m3u8]"
+            f"best*[protocol^=m3u8][vcodec!=none][height<={max_height}]/"
+            "worst*[protocol^=m3u8][vcodec!=none]"
         )
         command = [
             sys.executable,
@@ -226,8 +235,8 @@ class YouTubeResolver:
             selector,
             "--dump-single-json",
         ]
-        if profile == "web_safari":
-            command.extend(["--extractor-args", "youtube:player_client=web_safari"])
+        if profile != "default":
+            command.extend(["--extractor-args", f"youtube:player_client={profile}"])
         command.append(source)
         return command
 

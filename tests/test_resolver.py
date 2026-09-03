@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.config import Channel, Settings
 from app.models import ResolvedStream
-from app.resolver import YouTubeResolver, _last_json_object
+from app.resolver import YouTubeResolver, _clean_error, _last_json_object, _selected_stream
 
 
 def make_settings(tmp_path: Path) -> Settings:
@@ -46,8 +46,37 @@ def test_command_requests_hls_and_deno(tmp_path: Path) -> None:
     assert "--js-runtimes deno" in joined
     assert "height<=720" in joined
     assert "protocol^=m3u8" in joined
+    assert "best*" in joined
     assert "--no-playlist" in command
     assert "--remote-components" not in command
+
+
+def test_command_can_select_mweb_for_po_token_provider(tmp_path: Path) -> None:
+    resolver = YouTubeResolver(make_settings(tmp_path), (make_channel(),))
+    command = resolver._command(make_channel().sources[0], "mweb")
+    assert "youtube:player_client=mweb" in command
+
+
+def test_selected_stream_prefers_master_manifest() -> None:
+    url, protocol, height = _selected_stream(
+        {
+            "url": "https://manifest.googlevideo.com/api/manifest/hls_variant/video-only",
+            "manifest_url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/master",
+            "protocol": "m3u8_native",
+            "height": 720,
+        }
+    )
+    assert url == "https://manifest.googlevideo.com/api/manifest/hls_playlist/master"
+    assert protocol == "m3u8_native"
+    assert height == 720
+
+
+def test_clean_error_keeps_reason_and_remediation() -> None:
+    message = "Sign in to confirm you're not a bot. " + ("detail " * 100) + "Use cookies for authentication."
+    cleaned = _clean_error(message, limit=160)
+    assert cleaned.startswith("Sign in to confirm")
+    assert cleaned.endswith("Use cookies for authentication.")
+    assert len(cleaned) == 160
 
 
 def test_last_json_object_ignores_non_json_lines() -> None:
