@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Finish an existing Cloud Run deployment, force a public run.app endpoint,
-# distinguish a Cloud Run edge 404 from an application 404, and print the
-# complete Tubo playlist URL after verification.
+# Finish an existing Cloud Run deployment and choose the Cloud Run URL that
+# actually reaches the service. Cloud Run can expose both a legacy hashed URL
+# and a newer project-number URL; during URL migration one may temporarily
+# return Google's generic 404 page even while the service is Ready.
 
 REGION="${REGION:-asia-east1}"
 SERVICE="${SERVICE:-tw-news-m3u}"
@@ -21,11 +22,7 @@ fail() {
 }
 
 cleanup() {
-  rm -f "${TMP_BODY:-}" "${TMP_HEADERS:-}" "${TMP_AUTH_BODY:-}" "${TMP_AUTH_HEADERS:-}" "${TMP_PROXY_LOG:-}" 2>/dev/null || true
-  if [[ -n "${PROXY_PID:-}" ]]; then
-    kill "$PROXY_PID" >/dev/null 2>&1 || true
-    wait "$PROXY_PID" >/dev/null 2>&1 || true
-  fi
+  rm -rf "${TMP_DIR:-}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -43,10 +40,7 @@ gcloud run services describe "$SERVICE" \
   --region "$REGION" >/dev/null 2>&1 \
   || fail "找不到 Cloud Run 服務 ${SERVICE}（${PROJECT_ID}/${REGION}）。"
 
-log "強制啟用公開 run.app 端點"
-# Disable both Invoker IAM checks and IAP unconditionally. Tubo cannot attach
-# Google identity tokens; the application still protects playlists with its
-# own ACCESS_KEY.
+log "確認公開存取設定"
 gcloud run services update "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
@@ -57,104 +51,107 @@ gcloud run services update "$SERVICE" \
   --quiet >/dev/null \
   || fail "無法把 Cloud Run 設為公開；可能受到組織政策限制。"
 
-SERVICE_URL="$(gcloud run services describe "$SERVICE" \
+TMP_DIR="$(mktemp -d)"
+SERVICE_JSON="$TMP_DIR/service.json"
+
+# Give the routing control plane a moment, then read a fresh service object.
+sleep 5
+gcloud run services describe "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
-  --format='value(status.url)' 2>/dev/null || true)"
-[[ -n "$SERVICE_URL" ]] || fail "Cloud Run 沒有回傳服務網址。"
-printf 'Service URL: %s\n' "$SERVICE_URL"
+  --format=json >"$SERVICE_JSON"
 
-TMP_BODY="$(mktemp)"
-TMP_HEADERS="$(mktemp)"
-TMP_AUTH_BODY="$(mktemp)"
-TMP_AUTH_HEADERS="$(mktemp)"
-TMP_PROXY_LOG="$(mktemp)"
-HEALTH_URL="${SERVICE_URL}/healthz"
-HTTP_CODE=""
-HEALTH_OK=false
+mapfile -t CANDIDATE_URLS < <(python3 - "$SERVICE_JSON" <<'PY'
+import json
+import re
+import sys
 
-log "檢查未登入的 /healthz"
-for attempt in $(seq 1 5); do
-  : >"$TMP_BODY"
-  : >"$TMP_HEADERS"
-  HTTP_CODE="$(curl \
-    --silent \
-    --show-error \
-    --location \
-    --connect-timeout 10 \
-    --max-time 30 \
-    --dump-header "$TMP_HEADERS" \
-    --output "$TMP_BODY" \
-    --write-out '%{http_code}' \
-    "$HEALTH_URL" 2>/dev/null || true)"
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
 
-  if [[ "$HTTP_CODE" == "200" ]] && grep -q '"ok"[[:space:]]*:[[:space:]]*true' "$TMP_BODY"; then
-    HEALTH_OK=true
-    break
-  fi
+urls = []
 
-  printf '第 %s 次：HTTP %s\n' "$attempt" "${HTTP_CODE:-連線失敗}"
-  sleep 2
-done
+def add(value):
+    if isinstance(value, str):
+        value = value.strip().rstrip("/")
+        if value.startswith("https://") and value not in urls:
+            urls.append(value)
 
-if [[ "$HEALTH_OK" != "true" ]]; then
-  printf '\n未登入回應標頭：\n' >&2
-  sed -n '1,30p' "$TMP_HEADERS" >&2 || true
-  printf '\n未登入回應內容（HTTP %s）：\n' "${HTTP_CODE:-連線失敗}" >&2
-  sed -n '1,30p' "$TMP_BODY" >&2 || true
+# Prefer the service URL selected by the Cloud Run API.
+add((data.get("status") or {}).get("url"))
 
-  log "使用 Google 身分權杖測試同一網址"
-  ID_TOKEN="$(gcloud auth print-identity-token 2>/dev/null || true)"
-  AUTH_CODE=""
-  if [[ -n "$ID_TOKEN" ]]; then
-    AUTH_CODE="$(curl \
+annotation = ((data.get("metadata") or {}).get("annotations") or {}).get(
+    "run.googleapis.com/urls"
+)
+if isinstance(annotation, str):
+    try:
+        parsed = json.loads(annotation)
+    except json.JSONDecodeError:
+        parsed = re.findall(r"https://[^\s\"']+", annotation)
+    if isinstance(parsed, list):
+        for item in parsed:
+            add(item)
+
+for url in urls:
+    print(url)
+PY
+)
+
+[[ "${#CANDIDATE_URLS[@]}" -gt 0 ]] || fail "Cloud Run 沒有回報任何服務網址。"
+
+printf '\nCloud Run 回報的網址：\n'
+printf '  %s\n' "${CANDIDATE_URLS[@]}"
+
+SERVICE_URL=""
+LAST_CODE=""
+LAST_URL=""
+
+log "逐一測試 /healthz，選出可用網址"
+for round in $(seq 1 8); do
+  for base_url in "${CANDIDATE_URLS[@]}"; do
+    safe_name="$(printf '%s' "$base_url" | sha256sum | cut -c1-12)"
+    body_file="$TMP_DIR/body-$safe_name"
+    header_file="$TMP_DIR/header-$safe_name"
+    probe_url="${base_url}/healthz?probe=$(date +%s)-${round}"
+
+    result="$(curl \
       --silent \
       --show-error \
-      --location \
+      --http1.1 \
       --connect-timeout 10 \
       --max-time 30 \
-      --header "Authorization: Bearer ${ID_TOKEN}" \
-      --dump-header "$TMP_AUTH_HEADERS" \
-      --output "$TMP_AUTH_BODY" \
-      --write-out '%{http_code}' \
-      "$HEALTH_URL" 2>/dev/null || true)"
-    printf '登入測試：HTTP %s\n' "${AUTH_CODE:-連線失敗}" >&2
-    sed -n '1,20p' "$TMP_AUTH_HEADERS" >&2 || true
-    sed -n '1,20p' "$TMP_AUTH_BODY" >&2 || true
-  else
-    printf '無法取得 Google identity token。\n' >&2
-  fi
+      --header 'Cache-Control: no-cache' \
+      --dump-header "$header_file" \
+      --output "$body_file" \
+      --write-out '%{http_code}|%{url_effective}' \
+      "$probe_url" 2>/dev/null || true)"
 
-  log "透過 Cloud Run 本機認證代理測試應用程式"
-  PROXY_PORT="${PROXY_PORT:-18080}"
-  gcloud run services proxy "$SERVICE" \
-    --project "$PROJECT_ID" \
-    --region "$REGION" \
-    --port "$PROXY_PORT" >"$TMP_PROXY_LOG" 2>&1 &
-  PROXY_PID=$!
-  PROXY_CODE=""
-  PROXY_BODY=""
-  for _ in $(seq 1 10); do
-    PROXY_BODY="$(curl --silent --show-error --max-time 10 \
-      --write-out $'\n%{http_code}' \
-      "http://127.0.0.1:${PROXY_PORT}/healthz" 2>/dev/null || true)"
-    PROXY_CODE="${PROXY_BODY##*$'\n'}"
-    PROXY_BODY="${PROXY_BODY%$'\n'*}"
-    [[ "$PROXY_CODE" =~ ^[0-9]{3}$ ]] && break
-    sleep 1
+    code="${result%%|*}"
+    effective_url="${result#*|}"
+    LAST_CODE="$code"
+    LAST_URL="$effective_url"
+    printf '第 %s 輪：%s -> HTTP %s\n' "$round" "$base_url" "${code:-連線失敗}"
+
+    if [[ "$code" == "200" ]] \
+        && grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$body_file"; then
+      SERVICE_URL="$base_url"
+      break 2
+    fi
   done
-  printf '認證代理測試：HTTP %s\n' "${PROXY_CODE:-連線失敗}" >&2
-  printf '%s\n' "$PROXY_BODY" >&2
-  printf '\n代理記錄：\n' >&2
-  sed -n '1,40p' "$TMP_PROXY_LOG" >&2 || true
+  sleep 3
+done
 
-  printf '\nCloud Run 有效設定：\n' >&2
-  gcloud run services describe "$SERVICE" \
-    --project "$PROJECT_ID" \
-    --region "$REGION" \
-    --format='yaml(metadata.name,metadata.annotations,status.url,status.conditions,status.traffic,spec.template.spec.containers)' >&2 || true
+if [[ -z "$SERVICE_URL" ]]; then
+  printf '\nCloud Run status.url：\n' >&2
+  python3 - "$SERVICE_JSON" <<'PY' >&2
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+print((data.get("status") or {}).get("url") or "(none)")
+PY
 
-  printf '\n最近 20 分鐘的 Cloud Run HTTP 請求記錄：\n' >&2
+  printf '\n最後測試：HTTP %s，URL %s\n' "${LAST_CODE:-連線失敗}" "${LAST_URL:-未知}" >&2
+  printf '\n最近的 Cloud Run 請求記錄：\n' >&2
   gcloud logging read \
     "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND logName=\"projects/${PROJECT_ID}/logs/run.googleapis.com%2Frequests\"" \
     --project "$PROJECT_ID" \
@@ -168,14 +165,10 @@ if [[ "$HEALTH_OK" != "true" ]]; then
     --region "$REGION" \
     --limit=100 >&2 || true
 
-  if [[ "$PROXY_CODE" == "200" ]] && [[ "$PROXY_BODY" == *'"ok"'* ]]; then
-    fail "應用程式本身正常，但公開 run.app 路由被 Google Cloud 邊緣或組織政策阻擋。"
-  fi
-  if [[ "$AUTH_CODE" == "200" ]]; then
-    fail "服務需要 Google 登入身分；公開設定仍被組織政策阻擋。"
-  fi
-  fail "公開與認證測試都未通過；請提供上方診斷輸出，但遮住任何 key= 後的內容。"
+  fail "Cloud Run 已 Ready，但所有回報網址仍無法連到 /healthz。"
 fi
+
+printf '\n採用可用網址：%s\n' "$SERVICE_URL"
 
 ACCESS_KEY="$(gcloud secrets versions access latest \
   --secret "$SECRET_NAME" \
@@ -190,26 +183,28 @@ PY
 )"
 PLAYLIST_URL="${SERVICE_URL}/live.m3u?key=${ENCODED_KEY}"
 
-: >"$TMP_BODY"
+PLAYLIST_BODY="$TMP_DIR/playlist.m3u"
 PLAYLIST_CODE="$(curl \
   --silent \
   --show-error \
-  --location \
+  --http1.1 \
   --connect-timeout 10 \
   --max-time 30 \
-  --output "$TMP_BODY" \
+  --header 'Cache-Control: no-cache' \
+  --output "$PLAYLIST_BODY" \
   --write-out '%{http_code}' \
   "$PLAYLIST_URL" 2>/dev/null || true)"
 
-if [[ "$PLAYLIST_CODE" != "200" ]] || ! grep -q '^#EXTM3U' "$TMP_BODY"; then
+if [[ "$PLAYLIST_CODE" != "200" ]] || ! grep -q '^#EXTM3U' "$PLAYLIST_BODY"; then
   printf '\nM3U 檢查失敗：HTTP %s\n' "${PLAYLIST_CODE:-連線失敗}" >&2
-  sed -n '1,20p' "$TMP_BODY" >&2 || true
+  sed -n '1,20p' "$PLAYLIST_BODY" >&2 || true
   fail "服務健康，但 M3U 清單無法讀取。"
 fi
 
 umask 077
 printf '%s\n' "$PLAYLIST_URL" > "$URL_FILE"
 printf '%s\n' "$PROJECT_ID" > "$HOME/tw-news-m3u-project-id.txt"
+printf '%s\n' "$SERVICE_URL" > "$HOME/tw-news-m3u-service-url.txt"
 
 cat <<EOF
 
