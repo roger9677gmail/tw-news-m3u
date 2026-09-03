@@ -512,6 +512,12 @@ def create_app(
             )
         except (KaraokeError, TypeError, ValueError) as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        except Exception:
+            LOGGER.exception("Unable to create karaoke upload session")
+            return JSONResponse(
+                status_code=502,
+                content={"ok": False, "error": "無法建立雲端上傳連結，請稍後重試"},
+            )
         return JSONResponse({"ok": True, **result})
 
     @app.post("/api/karaoke/uploads/{upload_id}/complete")
@@ -526,8 +532,14 @@ def create_app(
                 title=str(payload.get("title") or ""),
                 file_name=str(payload.get("file_name") or ""),
             )
-        except KaraokeError as exc:
+        except (KaraokeError, TypeError, ValueError) as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        except Exception:
+            LOGGER.exception("Unable to complete karaoke upload %s", upload_id)
+            return JSONResponse(
+                status_code=502,
+                content={"ok": False, "error": "雲端轉檔失敗，請稍後重試"},
+            )
         return JSONResponse({"ok": True, "song": song.as_dict()})
 
     @app.delete("/api/karaoke/songs/{song_id}")
@@ -539,6 +551,12 @@ def create_app(
             deleted = await karaoke_backend.delete_song(song_id)
         except KaraokeError as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        except Exception:
+            LOGGER.exception("Unable to delete karaoke song %s", song_id)
+            return JSONResponse(
+                status_code=502,
+                content={"ok": False, "error": "雲端刪除失敗，請稍後重試"},
+            )
         if not deleted:
             raise HTTPException(status_code=404, detail="找不到歌曲")
         return JSONResponse({"ok": True, "deleted": song_id})
