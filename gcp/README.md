@@ -5,7 +5,7 @@
 1. `deploy-cloud-run.sh`：在 Google Cloud Shell 直接完成第一次部署。
 2. `setup-github-actions.sh`：建立 Workload Identity Federation，之後由 GitHub Actions 自動更新 Cloud Run，不保存長效 JSON 金鑰。
 
-> 重要：Cloud Run 能提供固定 HTTPS 網址，但 YouTube 仍可能對 Google 雲端 IP 顯示「Sign in to confirm you're not a bot」。部署成功不代表所有頻道一定能解析，必須實測。
+> 目前預設的 8 個頻道使用 4GTV 官方行動直播來源，已避開 YouTube 對 Google 雲端 IP 的機器人驗證。自行新增的 YouTube 頻道仍可能受此限制。
 
 ## 需求
 
@@ -48,7 +48,7 @@ https://tw-news-m3u-xxxxxxxxxx-de.a.run.app
 https://tw-news-m3u-xxxxxxxxxx-de.a.run.app/live.m3u?key=你的播放權杖
 ```
 
-先用瀏覽器打開網站，輸入播放權杖並測試頻道，再將完整 M3U 網址貼進途播。
+先用瀏覽器打開網站，輸入播放權杖並測試頻道，再將完整 M3U 網址貼進途播。預設 8 台應在數秒內完成測試。
 
 ## 啟用 GitHub Actions 自動部署
 
@@ -108,7 +108,7 @@ request timeout: 3600 seconds
 
 即使部署位於台灣區域，Google Cloud 的出口仍屬資料中心網路。YouTube 可能要求 Cookie、登入或機器人驗證。請勿將個人 YouTube Cookie 直接提交到公開 GitHub repo。
 
-如果所有頻道都出現機器人驗證，改用家中 NAS／固定住宅網路通常會比公有雲更可靠。Google Cloud 可繼續保留作為管理網站或備援測試。
+預設 8 台不依賴 YouTube 解析。只有自行加入、且沒有 `fourgtv` 官方來源設定的頻道，才會走 YouTube 備援並可能遇到機器人驗證。
 
 ## 常用指令
 

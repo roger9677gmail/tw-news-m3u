@@ -18,6 +18,8 @@ class Channel:
     group: str
     short_name: str
     sources: tuple[str, ...]
+    fourgtv_channel_id: str | None = None
+    fourgtv_asset_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +127,21 @@ def load_channels(path: Path) -> tuple[Channel, ...]:
                 raise RuntimeError(f"頻道 {channel_id} 有不合法來源網址")
             sources.append(source.strip())
 
+        fourgtv = item.get("fourgtv")
+        fourgtv_channel_id: str | None = None
+        fourgtv_asset_id: str | None = None
+        if fourgtv is not None:
+            if not isinstance(fourgtv, dict):
+                raise RuntimeError(f"頻道 {channel_id} 的 fourgtv 必須是物件")
+            raw_channel_id = fourgtv.get("channel_id")
+            raw_asset_id = fourgtv.get("asset_id")
+            if not isinstance(raw_channel_id, str) or not raw_channel_id.strip():
+                raise RuntimeError(f"頻道 {channel_id} 缺少 fourgtv.channel_id")
+            if not isinstance(raw_asset_id, str) or not raw_asset_id.strip():
+                raise RuntimeError(f"頻道 {channel_id} 缺少 fourgtv.asset_id")
+            fourgtv_channel_id = raw_channel_id.strip()
+            fourgtv_asset_id = raw_asset_id.strip()
+
         channels.append(
             Channel(
                 id=channel_id,
@@ -132,6 +149,8 @@ def load_channels(path: Path) -> tuple[Channel, ...]:
                 group=_require_text(item, "group", index),
                 short_name=str(item.get("short_name") or item["name"]).strip(),
                 sources=tuple(sources),
+                fourgtv_channel_id=fourgtv_channel_id,
+                fourgtv_asset_id=fourgtv_asset_id,
             )
         )
 

@@ -1,17 +1,17 @@
 # 台灣新聞直播 M3U Relay
 
-將台灣新聞台的**官方公開 YouTube 直播**，即時轉成途播與其他 HLS/M3U 播放器可使用的固定清單。
+將台灣新聞台的**官方公開直播**，即時轉成途播與其他 HLS/M3U 播放器可使用的固定清單。Cloud Run 版本優先使用 4GTV 官方行動直播來源，避免公有雲出口被 YouTube 機器人驗證攔截。
 
 專案入口：<https://roger9677gmail.github.io/tw-news-m3u/>（GitHub Pages 僅提供靜態說明；直播 Relay 仍需依下方步驟部署。）
 
 ## 為什麼不是只放一個 GitHub Pages 網址？
 
-YouTube 直播的實際 HLS 網址會過期，而且部分網址必須由「解析它的同一個網路出口」取回。GitHub Pages 只能放靜態檔案，不能在途播點台時現場解析與轉送，因此本專案採用：
+直播的實際 HLS 網址會過期。GitHub Pages 只能放靜態檔案，不能在途播點台時現場取得與轉送，因此本專案採用：
 
 ```text
 GitHub：保存程式碼
-Synology NAS／Docker：即時解析 + HLS 轉送
-途播：永久匯入 NAS 的固定 live.m3u
+Google Cloud Run：取得官方 HLS + 轉送
+途播：永久匯入 Cloud Run 的固定 live.m3u
 ```
 
 途播看到的每個頻道網址固定不變，例如：
@@ -20,7 +20,7 @@ Synology NAS／Docker：即時解析 + HLS 轉送
 https://你的網域/hls/tvbs-news/master.m3u8?key=你的存取密碼
 ```
 
-NAS 在第一次點台時才解析當下的官方直播，之後短暫快取結果。
+Cloud Run 在第一次點台時取得當下的官方直播，之後短暫快取結果。
 
 ## 已預設的新聞台
 
@@ -28,15 +28,12 @@ NAS 在第一次點台時才解析當下的官方直播，之後短暫快取結�
 - 三立新聞
 - 東森新聞
 - 民視新聞
-- 台視新聞
 - 中視新聞
 - 寰宇新聞
-- 公視網路直播
-- 非凡財經新聞
 - 東森財經新聞
 - 鏡新聞
 
-來源都集中在 [`channels.json`](channels.json)，可自行增刪官方公開直播。
+目前清單只保留已實際驗證可從 Cloud Run 播放的 8 台。來源集中在 [`channels.json`](channels.json)。
 
 ---
 
@@ -62,7 +59,7 @@ https://github.com/roger9677gmail/tw-news-m3u.git
 3. 把解壓後的所有檔案與資料夾拖入；要包含 `.github`、`app`、`tests`。
 4. Commit message 可填 `Create Taiwan news M3U relay`，再按 **Commit changes**。
 
-GitHub 只負責保存程式與執行測試；直播服務仍要在 NAS 啟動。
+GitHub 只負責保存程式與執行測試；直播服務要在 Cloud Run 或自有 Docker 主機啟動。
 
 ---
 
@@ -189,11 +186,11 @@ docker compose up -d
 
 1. 途播讀取 `/live.m3u`。
 2. 點選頻道後，途播要求 `/hls/<頻道>/master.m3u8`。
-3. NAS 使用 yt-dlp 解析官方公開直播。
-4. NAS 下載 HLS manifest，將裡面的播放清單、分段與金鑰網址改寫成短期內部權杖。
-5. 途播後續所有影音請求都由 NAS 代為取回。
+3. Relay 優先透過 4GTV 官方行動 API 取得直播；自訂 YouTube 頻道才使用 yt-dlp 備援。
+4. Relay 下載 HLS manifest，將裡面的播放清單、分段與金鑰網址改寫成短期內部權杖。
+5. 途播後續所有影音請求都由 Relay 代為取回。
 
-伺服器只允許 YouTube/GoogleVideo 相關媒體主機，不提供任意網址代理，避免被濫用成 open proxy。
+伺服器只允許 4GTV、中華電信 CDN 與 YouTube/GoogleVideo 相關媒體主機，不提供任意網址代理，避免被濫用成 open proxy。
 
 ## 新增或修改頻道
 

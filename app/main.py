@@ -99,7 +99,7 @@ def _m3u(channels: tuple[Channel, ...], request: Request, settings: Settings, ac
     base = _base_url(request, settings)
     lines = [
         "#EXTM3U",
-        "# Taiwan News M3U — streams are resolved on demand by this NAS relay.",
+        "# Taiwan News M3U — official streams are resolved on demand by this relay.",
     ]
     for channel in channels:
         name = channel.name.replace("\n", " ").replace(",", "，")
@@ -463,7 +463,7 @@ def create_app(
         if response.status_code not in {403, 404, 410}:
             return response
 
-        # A cached YouTube URL may have expired between manifest reloads.
+        # A cached upstream URL may have expired between manifest reloads.
         resolver.invalidate(channel_id)
         try:
             fresh = await resolver.resolve(channel_id, force=True)

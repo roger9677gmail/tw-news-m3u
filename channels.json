@@ -4,6 +4,10 @@
     "name": "TVBS NEWS",
     "group": "綜合新聞",
     "short_name": "TVBS",
+    "fourgtv": {
+      "channel_id": "473",
+      "asset_id": "media-live072"
+    },
     "sources": [
       "https://www.youtube.com/@tvbsnews01/live",
       "https://www.youtube.com/live/m_dhMSvUCIc"
@@ -14,6 +18,10 @@
     "name": "三立新聞 LIVE",
     "group": "綜合新聞",
     "short_name": "三立",
+    "fourgtv": {
+      "channel_id": "229",
+      "asset_id": "4gtv-live089"
+    },
     "sources": [
       "https://www.youtube.com/@setnews-ch54/live",
       "https://www.youtube.com/channel/UC2TuODJhC03pLgd6MpWP0iw/live",
@@ -25,6 +33,10 @@
     "name": "東森新聞 CH51",
     "group": "綜合新聞",
     "short_name": "東森",
+    "fourgtv": {
+      "channel_id": "292",
+      "asset_id": "4gtv-4gtv152"
+    },
     "sources": [
       "https://www.youtube.com/@newsebc/live",
       "https://www.youtube.com/user/newsebc/live",
@@ -36,6 +48,10 @@
     "name": "民視新聞",
     "group": "綜合新聞",
     "short_name": "民視",
+    "fourgtv": {
+      "channel_id": "31",
+      "asset_id": "litv-ftv13"
+    },
     "sources": [
       "https://www.youtube.com/@FTV_News/live",
       "https://www.youtube.com/live/ylYJSBUgaMA",
@@ -43,20 +59,14 @@
     ]
   },
   {
-    "id": "ttv-news",
-    "name": "台視新聞",
-    "group": "綜合新聞",
-    "short_name": "台視",
-    "sources": [
-      "https://www.youtube.com/@TTV_NEWS/live",
-      "https://www.youtube.com/live/9iRAqBMakXY"
-    ]
-  },
-  {
     "id": "ctv-news",
     "name": "中視新聞",
     "group": "綜合新聞",
     "short_name": "中視",
+    "fourgtv": {
+      "channel_id": "33",
+      "asset_id": "4gtv-4gtv074"
+    },
     "sources": [
       "https://www.youtube.com/@twctvnews/live",
       "https://www.youtube.com/@chinatvnews/live",
@@ -68,6 +78,10 @@
     "name": "寰宇新聞",
     "group": "綜合新聞",
     "short_name": "寰宇",
+    "fourgtv": {
+      "channel_id": "36",
+      "asset_id": "litv-longturn14"
+    },
     "sources": [
       "https://www.youtube.com/@globalnewstw/live",
       "https://www.youtube.com/channel/UCp2f7tGJGN6R9Muxipem8Nw/live",
@@ -75,30 +89,14 @@
     ]
   },
   {
-    "id": "pts-live",
-    "name": "公視網路直播",
-    "group": "公共媒體",
-    "short_name": "公視",
-    "sources": [
-      "https://www.youtube.com/@ptslivestream/live",
-      "https://www.youtube.com/channel/UCXgIO9jJVsX5_2ideiSkfvA/live"
-    ]
-  },
-  {
-    "id": "ustv-finance",
-    "name": "非凡財經新聞",
-    "group": "財經新聞",
-    "short_name": "非凡",
-    "sources": [
-      "https://www.youtube.com/@ustv/live",
-      "https://www.youtube.com/watch?v=eA6Aczd3FZM"
-    ]
-  },
-  {
     "id": "ebc-finance",
     "name": "東森財經新聞",
     "group": "財經新聞",
     "short_name": "財經",
+    "fourgtv": {
+      "channel_id": "293",
+      "asset_id": "4gtv-4gtv153"
+    },
     "sources": [
       "https://www.youtube.com/@57ETFN/live",
       "https://www.youtube.com/channel/UCuzqko_GKcj9922M1gUo__w/live"
@@ -109,6 +107,10 @@
     "name": "鏡新聞",
     "group": "綜合新聞",
     "short_name": "鏡新聞",
+    "fourgtv": {
+      "channel_id": "268",
+      "asset_id": "4gtv-4gtv075"
+    },
     "sources": [
       "https://www.youtube.com/@mnews-tw/live",
       "https://www.youtube.com/watch?v=5n0y6b0Q25o"

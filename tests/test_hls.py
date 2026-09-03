@@ -15,6 +15,8 @@ from app.hls import (
 def test_validate_upstream_url_allowlist() -> None:
     assert validate_upstream_url("https://manifest.googlevideo.com/api/manifest/hls_playlist/test")
     assert validate_upstream_url("https://rr1---sn.example.googlevideo.com/videoplayback?id=1")
+    assert validate_upstream_url("https://4gtvfreemobile-cds.cdn.hinet.net/live/index.m3u8")
+    assert validate_upstream_url("https://4gtvfreemobile-mozai.4gtv.tv/live/index.m3u8")
     with pytest.raises(UnsafeUpstreamURL):
         validate_upstream_url("https://example.com/private")
     with pytest.raises(UnsafeUpstreamURL):

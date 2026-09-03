@@ -48,4 +48,4 @@ bash gcp/setup-github-actions.sh
 
 然後在 GitHub Actions 執行 **Deploy to Google Cloud Run**。
 
-> 公有雲出口仍可能被 YouTube 要求機器人驗證；請在部署後先從管理頁測試頻道。影片會經過 Cloud Run 轉送，也可能產生對外資料傳輸費。
+> 預設 8 台使用 4GTV 官方行動直播來源，不需要 YouTube Cookie，也不需要家中 NAS 或電腦。影片會經過 Cloud Run 轉送，可能產生對外資料傳輸費。

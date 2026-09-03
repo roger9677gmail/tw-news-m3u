@@ -116,3 +116,46 @@ def test_resolver_reuses_cached_result(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
     assert calls == 1
+
+
+def test_resolver_prefers_official_fourgtv_source(tmp_path: Path, monkeypatch) -> None:
+    channel = Channel(
+        id="official-news",
+        name="Official News",
+        group="News",
+        short_name="Official",
+        sources=("https://www.youtube.com/@example/live",),
+        fourgtv_channel_id="31",
+        fourgtv_asset_id="litv-ftv13",
+    )
+    resolver = YouTubeResolver(make_settings(tmp_path), (channel,))
+    calls: list[str] = []
+
+    async def fake_fourgtv(selected: Channel) -> ResolvedStream:
+        calls.append(selected.id)
+        now = datetime.now(tz=UTC)
+        return ResolvedStream(
+            channel_id=selected.id,
+            source="4GTV 官方行動直播",
+            stream_url="https://4gtvfreemobile-cds.cdn.hinet.net/live/index.m3u8",
+            webpage_url="https://www.4gtv.tv/channel_list.html",
+            title=selected.name,
+            video_id=selected.fourgtv_asset_id or "",
+            protocol="m3u8_native",
+            height=None,
+            headers={"User-Agent": "test"},
+            resolved_at=now,
+            expires_at=None,
+        )
+
+    async def fail_youtube(*args, **kwargs) -> ResolvedStream:
+        raise AssertionError("YouTube fallback should not run")
+
+    monkeypatch.setattr("app.resolver.resolve_fourgtv", fake_fourgtv)
+    resolver._extract = fail_youtube  # type: ignore[method-assign]
+
+    stream = asyncio.run(resolver.resolve(channel.id))
+
+    assert stream.source == "4GTV 官方行動直播"
+    assert calls == [channel.id]
+    assert resolver.status_snapshot()[channel.id].state == "online"

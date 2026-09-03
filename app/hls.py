@@ -14,6 +14,8 @@ ALLOWED_HOST_SUFFIXES = (
     "youtube.com",
     "youtu.be",
     "googleusercontent.com",
+    "4gtv.tv",
+    "cdn.hinet.net",
 )
 URI_ATTRIBUTE_RE = re.compile(r'(?P<prefix>\bURI=)(?P<quote>["\'])(?P<uri>.*?)(?P=quote)')
 RESOLUTION_HEIGHT_RE = re.compile(r"(?:^|,)RESOLUTION=\d+x(?P<height>\d+)(?:,|$)")

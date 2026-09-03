@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .config import Channel, Settings
+from .fourgtv import resolve_fourgtv
 from .models import ResolvedStream, ResolverStatus
 
 LOGGER = logging.getLogger(__name__)
@@ -159,6 +160,14 @@ class YouTubeResolver:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self.settings.resolver_timeout_seconds
 
+            if channel.fourgtv_channel_id and channel.fourgtv_asset_id:
+                try:
+                    stream = await resolve_fourgtv(channel)
+                except Exception as exc:
+                    errors.append(f"4GTV 官方來源：{_clean_error(str(exc), 280)}")
+                else:
+                    return self._store_success(channel_id, stream, "iOS")
+
             for source in channel.sources:
                 for profile in ("mweb", "web_safari", "default"):
                     remaining = deadline - loop.time()
@@ -173,31 +182,7 @@ class YouTubeResolver:
                         errors.append(f"{source} [{profile}]：{_clean_error(str(exc), 280)}")
                         continue
 
-                    self._cache[channel_id] = stream
-                    cached_until = min(
-                        stream.resolved_at + timedelta(seconds=self.settings.resolver_ttl_seconds),
-                        (stream.expires_at - timedelta(minutes=2))
-                        if stream.expires_at
-                        else stream.resolved_at
-                        + timedelta(seconds=self.settings.resolver_ttl_seconds),
-                    )
-                    status.state = "online"
-                    status.title = stream.title
-                    status.height = stream.height
-                    status.source = stream.source
-                    status.webpage_url = stream.webpage_url
-                    status.resolved_at = stream.resolved_at
-                    status.expires_at = stream.expires_at
-                    status.cached_until = cached_until
-                    status.error = None
-                    LOGGER.info(
-                        "Resolved %s via %s (%s, %sp)",
-                        channel_id,
-                        source,
-                        profile,
-                        stream.height or "?",
-                    )
-                    return stream
+                    return self._store_success(channel_id, stream, profile)
 
             message = _clean_error(" || ".join(errors), 900)
             status.state = "error"
@@ -207,6 +192,36 @@ class YouTubeResolver:
             )
             LOGGER.warning("Unable to resolve %s: %s", channel_id, message)
             raise ResolveError(message)
+
+    def _store_success(
+        self, channel_id: str, stream: ResolvedStream, profile: str
+    ) -> ResolvedStream:
+        self._cache[channel_id] = stream
+        cached_until = min(
+            stream.resolved_at + timedelta(seconds=self.settings.resolver_ttl_seconds),
+            (stream.expires_at - timedelta(minutes=2))
+            if stream.expires_at
+            else stream.resolved_at
+            + timedelta(seconds=self.settings.resolver_ttl_seconds),
+        )
+        status = self._status[channel_id]
+        status.state = "online"
+        status.title = stream.title
+        status.height = stream.height
+        status.source = stream.source
+        status.webpage_url = stream.webpage_url
+        status.resolved_at = stream.resolved_at
+        status.expires_at = stream.expires_at
+        status.cached_until = cached_until
+        status.error = None
+        LOGGER.info(
+            "Resolved %s via %s (%s, %sp)",
+            channel_id,
+            stream.source,
+            profile,
+            stream.height or "?",
+        )
+        return stream
 
     def _command(self, source: str, profile: str) -> list[str]:
         max_height = self.settings.max_height
