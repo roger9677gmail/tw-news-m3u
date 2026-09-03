@@ -1,6 +1,7 @@
 // Taiwan News M3U Relay — iPhone refresh helper for Scriptable.
 const BASE_URL = "https://tw-news-m3u-1079887872019.asia-east1.run.app";
 const KEYCHAIN_ID = "tw-news-m3u-access-key";
+const AUTOMATED = config.runsWithSiri || !config.runsInApp;
 
 async function message(title, body) {
   const alert = new Alert();
@@ -12,6 +13,9 @@ async function message(title, body) {
 
 async function accessKey() {
   if (Keychain.contains(KEYCHAIN_ID)) return Keychain.get(KEYCHAIN_ID);
+  if (AUTOMATED) {
+    throw new Error("尚未設定播放權杖，請先在 Scriptable 手動執行一次。");
+  }
   const alert = new Alert();
   alert.title = "輸入播放權杖";
   alert.message = "只需輸入一次，會安全保存在 iPhone Keychain。";
@@ -45,6 +49,32 @@ async function relayJSON(path, key, method = "GET", body = null) {
   return payload;
 }
 
+async function reportSuccess(channels) {
+  const body = `已更新 ${channels} 個頻道。`;
+  if (AUTOMATED) {
+    Script.setShortcutOutput(body);
+    return;
+  }
+  await message("更新成功", `${body}現在回到途播重新點台即可。`);
+}
+
+async function reportFailure(error) {
+  const body = String(error.message || error);
+  if (!AUTOMATED) {
+    await message("更新失敗", body);
+    return;
+  }
+  Script.setShortcutOutput(`更新失敗：${body}`);
+  try {
+    const notification = new Notification();
+    notification.title = "新聞直播更新失敗";
+    notification.body = body;
+    await notification.schedule();
+  } catch (_) {
+    // Shortcuts will still receive the error text as its action output.
+  }
+}
+
 try {
   const key = await accessKey();
   const plan = await relayJSON("/api/fourgtv/refresh-plan", key);
@@ -68,9 +98,9 @@ try {
     { responses }
   );
   Keychain.set(KEYCHAIN_ID, key);
-  await message("更新成功", `已更新 ${result.channels} 個頻道。現在回到途播重新點台即可。`);
+  await reportSuccess(result.channels);
 } catch (error) {
-  await message("更新失敗", String(error.message || error));
+  await reportFailure(error);
 }
 
 Script.complete();
