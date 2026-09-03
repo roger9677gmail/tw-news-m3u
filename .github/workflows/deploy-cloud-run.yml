@@ -94,6 +94,9 @@ jobs:
             ACCESS_KEY=tw-news-access-key:latest
           flags: >-
             --allow-unauthenticated
+            --no-invoker-iam-check
+            --no-iap
+            --default-url
             --ingress=all
             --port=8080
             --cpu=1
@@ -105,10 +108,11 @@ jobs:
             --service-account=${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
             --cpu-boost
 
-      - name: Verify health endpoint
+      - name: Verify public application endpoint
         shell: bash
         run: |
-          curl --fail --silent --show-error --retry 8 --retry-delay 3 \
-            "${{ steps.deploy.outputs.url }}/healthz"
-          echo
+          body="$(curl --fail --silent --show-error --retry 8 --retry-delay 3 \
+            "${{ steps.deploy.outputs.url }}/api/config")"
+          printf '%s\n' "$body"
+          grep -q '"channel_count"' <<<"$body"
           echo "Cloud Run URL: ${{ steps.deploy.outputs.url }}"
