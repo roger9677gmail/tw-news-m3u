@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Finish a Cloud Run deployment that has already created the service.
-# This version also repairs common Cloud Run 404 causes before checking the app:
-# disabled run.app URL, restricted ingress, or missing public invocation access.
+# Finish an existing Cloud Run deployment, force a public run.app endpoint,
+# distinguish a Cloud Run edge 404 from an application 404, and print the
+# complete Tubo playlist URL after verification.
 
 REGION="${REGION:-asia-east1}"
 SERVICE="${SERVICE:-tw-news-m3u}"
@@ -20,6 +20,15 @@ fail() {
   exit 1
 }
 
+cleanup() {
+  rm -f "${TMP_BODY:-}" "${TMP_HEADERS:-}" "${TMP_AUTH_BODY:-}" "${TMP_AUTH_HEADERS:-}" "${TMP_PROXY_LOG:-}" 2>/dev/null || true
+  if [[ -n "${PROXY_PID:-}" ]]; then
+    kill "$PROXY_PID" >/dev/null 2>&1 || true
+    wait "$PROXY_PID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
 command -v gcloud >/dev/null 2>&1 || fail "找不到 gcloud；請在 Google Cloud Shell 執行。"
 command -v curl >/dev/null 2>&1 || fail "找不到 curl。"
 command -v python3 >/dev/null 2>&1 || fail "找不到 python3。"
@@ -34,47 +43,40 @@ gcloud run services describe "$SERVICE" \
   --region "$REGION" >/dev/null 2>&1 \
   || fail "找不到 Cloud Run 服務 ${SERVICE}（${PROJECT_ID}/${REGION}）。"
 
-log "修復 Cloud Run 公開網址與 ingress"
+log "強制啟用公開 run.app 端點"
+# Disable both Invoker IAM checks and IAP unconditionally. Tubo cannot attach
+# Google identity tokens; the application still protects playlists with its
+# own ACCESS_KEY.
 gcloud run services update "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --ingress=all \
   --default-url \
-  --quiet >/dev/null
-
-# Tubo cannot attach a Google identity token, so the service must accept public
-# requests. The application itself still protects playlists with ACCESS_KEY.
-if ! gcloud run services add-iam-policy-binding "$SERVICE" \
-    --project "$PROJECT_ID" \
-    --region "$REGION" \
-    --member="allUsers" \
-    --role="roles/run.invoker" \
-    --condition=None \
-    --quiet >/dev/null 2>&1; then
-  log "IAM 公開綁定未成功，改用停用 Invoker IAM 檢查"
-  gcloud run services update "$SERVICE" \
-    --project "$PROJECT_ID" \
-    --region "$REGION" \
-    --no-invoker-iam-check \
-    --quiet >/dev/null \
-    || fail "Google Cloud 組織政策不允許公開 Cloud Run；途播將無法直接連線。"
-fi
+  --no-invoker-iam-check \
+  --no-iap \
+  --quiet >/dev/null \
+  || fail "無法把 Cloud Run 設為公開；可能受到組織政策限制。"
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --format='value(status.url)' 2>/dev/null || true)"
 [[ -n "$SERVICE_URL" ]] || fail "Cloud Run 沒有回傳服務網址。"
+printf 'Service URL: %s\n' "$SERVICE_URL"
 
 TMP_BODY="$(mktemp)"
 TMP_HEADERS="$(mktemp)"
-trap 'rm -f "$TMP_BODY" "$TMP_HEADERS"' EXIT
+TMP_AUTH_BODY="$(mktemp)"
+TMP_AUTH_HEADERS="$(mktemp)"
+TMP_PROXY_LOG="$(mktemp)"
 HEALTH_URL="${SERVICE_URL}/healthz"
 HTTP_CODE=""
 HEALTH_OK=false
 
-log "確認 Cloud Run 公開路由與應用程式"
-for attempt in $(seq 1 20); do
+log "檢查未登入的 /healthz"
+for attempt in $(seq 1 5); do
+  : >"$TMP_BODY"
+  : >"$TMP_HEADERS"
   HTTP_CODE="$(curl \
     --silent \
     --show-error \
@@ -91,29 +93,88 @@ for attempt in $(seq 1 20); do
     break
   fi
 
-  printf '尚未就緒（第 %s 次，HTTP %s）\n' "$attempt" "${HTTP_CODE:-連線失敗}"
-  sleep 3
+  printf '第 %s 次：HTTP %s\n' "$attempt" "${HTTP_CODE:-連線失敗}"
+  sleep 2
 done
 
 if [[ "$HEALTH_OK" != "true" ]]; then
-  printf '\n最後回應標頭：\n' >&2
+  printf '\n未登入回應標頭：\n' >&2
   sed -n '1,30p' "$TMP_HEADERS" >&2 || true
-  printf '\n最後回應內容（HTTP %s）：\n' "${HTTP_CODE:-連線失敗}" >&2
+  printf '\n未登入回應內容（HTTP %s）：\n' "${HTTP_CODE:-連線失敗}" >&2
   sed -n '1,30p' "$TMP_BODY" >&2 || true
+
+  log "使用 Google 身分權杖測試同一網址"
+  ID_TOKEN="$(gcloud auth print-identity-token 2>/dev/null || true)"
+  AUTH_CODE=""
+  if [[ -n "$ID_TOKEN" ]]; then
+    AUTH_CODE="$(curl \
+      --silent \
+      --show-error \
+      --location \
+      --connect-timeout 10 \
+      --max-time 30 \
+      --header "Authorization: Bearer ${ID_TOKEN}" \
+      --dump-header "$TMP_AUTH_HEADERS" \
+      --output "$TMP_AUTH_BODY" \
+      --write-out '%{http_code}' \
+      "$HEALTH_URL" 2>/dev/null || true)"
+    printf '登入測試：HTTP %s\n' "${AUTH_CODE:-連線失敗}" >&2
+    sed -n '1,20p' "$TMP_AUTH_HEADERS" >&2 || true
+    sed -n '1,20p' "$TMP_AUTH_BODY" >&2 || true
+  else
+    printf '無法取得 Google identity token。\n' >&2
+  fi
+
+  log "透過 Cloud Run 本機認證代理測試應用程式"
+  PROXY_PORT="${PROXY_PORT:-18080}"
+  gcloud run services proxy "$SERVICE" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --port "$PROXY_PORT" >"$TMP_PROXY_LOG" 2>&1 &
+  PROXY_PID=$!
+  PROXY_CODE=""
+  PROXY_BODY=""
+  for _ in $(seq 1 10); do
+    PROXY_BODY="$(curl --silent --show-error --max-time 10 \
+      --write-out $'\n%{http_code}' \
+      "http://127.0.0.1:${PROXY_PORT}/healthz" 2>/dev/null || true)"
+    PROXY_CODE="${PROXY_BODY##*$'\n'}"
+    PROXY_BODY="${PROXY_BODY%$'\n'*}"
+    [[ "$PROXY_CODE" =~ ^[0-9]{3}$ ]] && break
+    sleep 1
+  done
+  printf '認證代理測試：HTTP %s\n' "${PROXY_CODE:-連線失敗}" >&2
+  printf '%s\n' "$PROXY_BODY" >&2
+  printf '\n代理記錄：\n' >&2
+  sed -n '1,40p' "$TMP_PROXY_LOG" >&2 || true
 
   printf '\nCloud Run 有效設定：\n' >&2
   gcloud run services describe "$SERVICE" \
     --project "$PROJECT_ID" \
     --region "$REGION" \
-    --format='yaml(metadata.name,status.url,status.conditions,spec.template.spec.containers,spec.traffic)' >&2 || true
+    --format='yaml(metadata.name,metadata.annotations,status.url,status.conditions,status.traffic,spec.template.spec.containers)' >&2 || true
 
-  printf '\n最近的 Cloud Run 記錄：\n' >&2
+  printf '\n最近 20 分鐘的 Cloud Run HTTP 請求記錄：\n' >&2
+  gcloud logging read \
+    "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND logName=\"projects/${PROJECT_ID}/logs/run.googleapis.com%2Frequests\"" \
+    --project "$PROJECT_ID" \
+    --freshness=20m \
+    --limit=30 \
+    --format='table(timestamp,httpRequest.status,httpRequest.requestMethod,httpRequest.requestUrl,resource.labels.revision_name)' >&2 || true
+
+  printf '\n最近的容器記錄：\n' >&2
   gcloud run services logs read "$SERVICE" \
     --project "$PROJECT_ID" \
     --region "$REGION" \
-    --limit 100 >&2 || true
+    --limit=100 >&2 || true
 
-  fail "服務已部署，但 /healthz 仍未通過。"
+  if [[ "$PROXY_CODE" == "200" ]] && [[ "$PROXY_BODY" == *'"ok"'* ]]; then
+    fail "應用程式本身正常，但公開 run.app 路由被 Google Cloud 邊緣或組織政策阻擋。"
+  fi
+  if [[ "$AUTH_CODE" == "200" ]]; then
+    fail "服務需要 Google 登入身分；公開設定仍被組織政策阻擋。"
+  fi
+  fail "公開與認證測試都未通過；請提供上方診斷輸出，但遮住任何 key= 後的內容。"
 fi
 
 ACCESS_KEY="$(gcloud secrets versions access latest \
@@ -129,6 +190,7 @@ PY
 )"
 PLAYLIST_URL="${SERVICE_URL}/live.m3u?key=${ENCODED_KEY}"
 
+: >"$TMP_BODY"
 PLAYLIST_CODE="$(curl \
   --silent \
   --show-error \
