@@ -142,7 +142,9 @@ def _fetch_stream_url(channel: Channel, timeout_seconds: float) -> str:
         payload = response.json()
     except Exception as exc:
         raise FourGTVError(f"官方 API 連線失敗：{exc}") from exc
-    return _stream_urls(payload)[0]
+    # The first URL normally points at Hinet, which rejects some data-center
+    # networks. 4GTV's own Mozai CDN is the more portable relay source.
+    return _stream_urls(payload)[-1]
 
 
 async def resolve_fourgtv(channel: Channel, timeout_seconds: float = 15.0) -> ResolvedStream:
