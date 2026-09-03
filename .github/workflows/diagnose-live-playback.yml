@@ -40,7 +40,7 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Test YouTube resolution and first HLS requests from Cloud Run
+      - name: Probe every news channel with the production 4GTV cache
         shell: bash
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -69,14 +69,10 @@ jobs:
             --project "$PROJECT_ID" \
             --region "$REGION" \
             --format='value(spec.template.spec.containers[0].image)')"
-
-          if [[ -z "$IMAGE" ]]; then
-            echo "Unable to find the production image."
-            exit 1
-          fi
+          [[ -n "$IMAGE" ]] || { echo "Unable to find production image"; exit 1; }
 
           echo "Production image: ${IMAGE%%@*}@<digest>"
-          echo "Creating isolated diagnostic service: $DIAG_SERVICE"
+          echo "Creating isolated diagnostic service with the current production 4GTV cache"
 
           gcloud run deploy "$DIAG_SERVICE" \
             --project "$PROJECT_ID" \
@@ -84,9 +80,9 @@ jobs:
             --image "$IMAGE" \
             --service-account "$RUNTIME_SA" \
             --port 8080 \
-            --cpu 1 \
-            --memory 1Gi \
-            --concurrency 1 \
+            --cpu 2 \
+            --memory 4Gi \
+            --concurrency 8 \
             --min-instances 0 \
             --max-instances 1 \
             --timeout 300 \
@@ -95,7 +91,8 @@ jobs:
             --no-invoker-iam-check \
             --no-iap \
             --default-url \
-            --set-env-vars "ACCESS_KEY=${ACCESS_KEY},MAX_HEIGHT=480,RESOLVER_TIMEOUT_SECONDS=100,MAX_RESOLVER_CONCURRENCY=1,RESOLVER_FAILURE_TTL_SECONDS=10,UPSTREAM_TIMEOUT_SECONDS=30,LOG_LEVEL=INFO,TZ=Asia/Taipei" \
+            --set-secrets "/var/secrets/fourgtv/streams.json=tw-news-fourgtv-streams:latest" \
+            --set-env-vars "ACCESS_KEY=${ACCESS_KEY},FOURGTV_CACHE_FILE=/var/secrets/fourgtv/streams.json,MAX_HEIGHT=480,RESOLVER_TIMEOUT_SECONDS=55,MAX_RESOLVER_CONCURRENCY=8,RESOLVER_FAILURE_TTL_SECONDS=10,UPSTREAM_TIMEOUT_SECONDS=30,LOG_LEVEL=INFO,TZ=Asia/Taipei" \
             --quiet
 
           SERVICE_URL="$(gcloud run services describe "$DIAG_SERVICE" \
@@ -106,96 +103,100 @@ jobs:
 
           echo
           echo "=== Application readiness ==="
-          CONFIG_CODE="$(curl --silent --show-error --retry 8 --retry-delay 3 \
-            --connect-timeout 10 --max-time 30 \
-            --output /tmp/config.json --write-out '%{http_code}' \
-            "$SERVICE_URL/api/config" || true)"
-          echo "GET /api/config -> HTTP $CONFIG_CODE"
-          cat /tmp/config.json 2>/dev/null || true
+          curl --fail --silent --show-error --retry 8 --retry-delay 3 \
+            "$SERVICE_URL/api/config"
           echo
 
+          export SERVICE_URL ACCESS_KEY
           echo
-          echo "=== TVBS resolver probe ==="
-          PROBE_CODE="$(curl --silent --show-error \
-            --connect-timeout 10 --max-time 140 \
-            --request POST \
+          echo "=== Concurrent resolver probes for all configured news channels ==="
+          python3 - <<'PY'
+          import concurrent.futures
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.request
+
+          service = os.environ["SERVICE_URL"].rstrip("/")
+          key = os.environ["ACCESS_KEY"]
+          channels = [
+              "ftv-news", "pts-news", "tvbs-news", "setn-news",
+              "ctitv-news", "ebc-news", "global-news-tw", "era-news",
+          ]
+
+          def sanitize(value):
+              text = str(value or "")
+              text = re.sub(r"([?&](?:key|token|sig|signature|expire|expires)=[^&\s\"']+)", "<redacted>", text, flags=re.I)
+              text = re.sub(r"https://[^\s|]+", lambda m: m.group(0).split("?", 1)[0], text)
+              return text[:3000]
+
+          def probe(channel):
+              req = urllib.request.Request(
+                  f"{service}/api/channels/{channel}/probe",
+                  method="POST",
+                  headers={"X-Access-Key": key, "User-Agent": "tw-news-diagnostic/1"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=100) as response:
+                      code = response.status
+                      body = response.read().decode("utf-8", errors="replace")
+              except urllib.error.HTTPError as exc:
+                  code = exc.code
+                  body = exc.read().decode("utf-8", errors="replace")
+              except Exception as exc:
+                  return {"channel": channel, "http": 0, "ok": False, "error": sanitize(exc)}
+              try:
+                  payload = json.loads(body)
+              except Exception:
+                  payload = {"error": body}
+              return {
+                  "channel": channel,
+                  "http": code,
+                  "ok": code == 200 and bool(payload.get("ok", True)),
+                  "title": payload.get("title"),
+                  "height": payload.get("height"),
+                  "error": sanitize(payload.get("error") or payload.get("detail") or ""),
+              }
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=len(channels)) as pool:
+              results = list(pool.map(probe, channels))
+
+          print(json.dumps(results, ensure_ascii=False, indent=2))
+          print("SUMMARY", json.dumps({
+              "total": len(results),
+              "ok": sum(bool(item["ok"]) for item in results),
+              "failed": sum(not bool(item["ok"]) for item in results),
+          }, ensure_ascii=False))
+          PY
+
+          echo
+          echo "=== Resolver state and selected upstream source ==="
+          curl --fail --silent --show-error \
             --header "X-Access-Key: $ACCESS_KEY" \
-            --output /tmp/probe.json --write-out '%{http_code}' \
-            "$SERVICE_URL/api/channels/tvbs-news/probe" || true)"
-          echo "POST /api/channels/tvbs-news/probe -> HTTP $PROBE_CODE"
+            "$SERVICE_URL/api/status" > /tmp/status.json
           python3 - <<'PY'
           import json
-          from pathlib import Path
-          path = Path('/tmp/probe.json')
-          text = path.read_text(encoding='utf-8', errors='replace') if path.exists() else ''
-          try:
-              data = json.loads(text)
-          except Exception:
-              print(text[:5000])
-          else:
-              for key in ('key', 'access_key', 'stream_url', 'url'):
-                  data.pop(key, None)
-              print(json.dumps(data, ensure_ascii=False, indent=2)[:8000])
-          PY
+          import re
 
-          if [[ "$PROBE_CODE" != "200" ]]; then
-            echo
-            echo "RESULT: resolver_failed"
-            exit 0
-          fi
+          data = json.load(open('/tmp/status.json', encoding='utf-8'))
+          print('Status summary:', data.get('summary'))
+          for item in data.get('channels', []):
+              error = str(item.get('error') or '')
+              error = re.sub(r'https://[^\s|]+', lambda m: m.group(0).split('?', 1)[0], error)
+              print(json.dumps({
+                  'id': item.get('id'),
+                  'state': item.get('state'),
+                  'source': item.get('source'),
+                  'error': error[:2000],
+              }, ensure_ascii=False))
+          PY
 
           echo
-          echo "=== HLS master playlist ==="
-          MASTER_CODE="$(curl --silent --show-error \
-            --connect-timeout 10 --max-time 90 \
-            --header "X-Access-Key: $ACCESS_KEY" \
-            --dump-header /tmp/master.headers \
-            --output /tmp/master.m3u8 --write-out '%{http_code}' \
-            "$SERVICE_URL/hls/tvbs-news/master.m3u8" || true)"
-          echo "GET master.m3u8 -> HTTP $MASTER_CODE"
-          grep -Ei '^(content-type|content-length|content-range|accept-ranges|cache-control):' /tmp/master.headers || true
-          python3 - <<'PY'
-          from pathlib import Path
-          text = Path('/tmp/master.m3u8').read_text(encoding='utf-8', errors='replace') if Path('/tmp/master.m3u8').exists() else ''
-          print('Manifest marker:', text.lstrip().startswith('#EXTM3U'))
-          print('Manifest lines:', len(text.splitlines()))
-          PY
-
-          if [[ "$MASTER_CODE" != "200" ]]; then
-            echo "RESULT: master_playlist_failed"
-            exit 0
-          fi
-
-          FIRST_URL="$(python3 - <<'PY'
-          from pathlib import Path
-          text = Path('/tmp/master.m3u8').read_text(encoding='utf-8', errors='replace')
-          for line in text.splitlines():
-              line = line.strip()
-              if line and not line.startswith('#'):
-                  print(line)
-                  break
-          PY
-          )"
-
-          if [[ -z "$FIRST_URL" ]]; then
-            echo "RESULT: no_child_or_segment_url"
-            exit 0
-          fi
-
-          echo
-          echo "=== First referenced HLS object ==="
-          CHILD_CODE="$(curl --silent --show-error \
-            --connect-timeout 10 --max-time 90 \
-            --range 0-131071 \
-            --dump-header /tmp/child.headers \
-            --output /tmp/child.body --write-out '%{http_code}' \
-            "$FIRST_URL" || true)"
-          echo "GET first referenced object -> HTTP $CHILD_CODE"
-          grep -Ei '^(content-type|content-length|content-range|accept-ranges|cache-control):' /tmp/child.headers || true
-          echo "Downloaded bytes: $(wc -c </tmp/child.body 2>/dev/null || echo 0)"
-
-          if [[ "$CHILD_CODE" == "200" || "$CHILD_CODE" == "206" ]]; then
-            echo "RESULT: end_to_end_first_object_ok"
-          else
-            echo "RESULT: first_referenced_object_failed"
-          fi
+          echo "=== Relevant Cloud Run container logs ==="
+          gcloud run services logs read "$DIAG_SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --limit 300 2>/dev/null \
+            | grep -Ei 'cache unavailable|resolved |unable to resolve|fourgtv|youtube|confirm|403|expired|過期|失敗' \
+            | tail -160 || true
