@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
+import os
+import urllib.parse
 import uuid
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from Cryptodome.Cipher import AES
@@ -79,6 +83,38 @@ def _stream_urls(payload: Any) -> list[str]:
     return urls
 
 
+def stream_expiry(url: str) -> datetime | None:
+    try:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        values = [
+            int(raw)
+            for key in ("expires", "expires1", "expire")
+            for raw in query.get(key, [])
+            if str(raw).isdigit()
+        ]
+        if values:
+            return datetime.fromtimestamp(min(values), tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        pass
+    return None
+
+
+def _cached_stream_url(channel: Channel, cache_path: Path) -> str:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        channels = payload.get("channels") if isinstance(payload, dict) else None
+        entry = channels.get(channel.id) if isinstance(channels, dict) else None
+        url = entry.get("url") if isinstance(entry, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FourGTVError(f"無法讀取官方直播快取：{exc}") from exc
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise FourGTVError("官方直播快取缺少頻道網址")
+    expiry = stream_expiry(url)
+    if expiry and expiry <= datetime.now(tz=UTC):
+        raise FourGTVError("官方直播快取已過期")
+    return url
+
+
 def _fetch_stream_url(channel: Channel, timeout_seconds: float) -> str:
     if not channel.fourgtv_channel_id or not channel.fourgtv_asset_id:
         raise FourGTVError("頻道未設定 4GTV 官方來源")
@@ -110,14 +146,29 @@ def _fetch_stream_url(channel: Channel, timeout_seconds: float) -> str:
 
 
 async def resolve_fourgtv(channel: Channel, timeout_seconds: float = 15.0) -> ResolvedStream:
-    stream_url = await asyncio.wait_for(
-        asyncio.to_thread(_fetch_stream_url, channel, timeout_seconds),
-        timeout=timeout_seconds + 2,
-    )
+    cache_file = os.getenv("FOURGTV_CACHE_FILE", "").strip()
+    source = "4GTV 官方行動直播"
+    if cache_file:
+        try:
+            stream_url = await asyncio.to_thread(
+                _cached_stream_url, channel, Path(cache_file)
+            )
+            source = "4GTV 官方快取直播"
+        except FourGTVError as exc:
+            LOGGER.warning("4GTV cache unavailable for %s: %s", channel.id, exc)
+            stream_url = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_stream_url, channel, timeout_seconds),
+                timeout=timeout_seconds + 2,
+            )
+    else:
+        stream_url = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_stream_url, channel, timeout_seconds),
+            timeout=timeout_seconds + 2,
+        )
     resolved_at = datetime.now(tz=UTC).replace(microsecond=0)
     return ResolvedStream(
         channel_id=channel.id,
-        source="4GTV 官方行動直播",
+        source=source,
         stream_url=stream_url,
         webpage_url="https://www.4gtv.tv/channel_list.html",
         title=channel.name,
@@ -126,5 +177,5 @@ async def resolve_fourgtv(channel: Channel, timeout_seconds: float = 15.0) -> Re
         height=None,
         headers={"User-Agent": APP_USER_AGENT, "Accept": "*/*"},
         resolved_at=resolved_at,
-        expires_at=None,
+        expires_at=stream_expiry(stream_url),
     )

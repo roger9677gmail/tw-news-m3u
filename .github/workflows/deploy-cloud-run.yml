@@ -89,9 +89,11 @@ jobs:
             UPSTREAM_TIMEOUT_SECONDS=25
             LOG_LEVEL=INFO
             TZ=Asia/Taipei
+            FOURGTV_CACHE_FILE=/var/secrets/fourgtv/streams.json
           secrets_update_strategy: overwrite
           secrets: |-
             ACCESS_KEY=tw-news-access-key:latest
+            /var/secrets/fourgtv/streams.json=tw-news-fourgtv-streams:latest
           flags: >-
             --allow-unauthenticated
             --no-invoker-iam-check
