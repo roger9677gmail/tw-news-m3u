@@ -35,6 +35,8 @@ Cloud Run 在第一次點台時取得當下的官方直播，之後短暫快取�
 
 目前清單只保留已實際驗證可從 Cloud Run 播放的 8 台。來源集中在 [`channels.json`](channels.json)。
 
+4GTV 的短期直播網址會過期，而 4GTV 會拒絕 Cloud Run 與 GitHub 美國執行器直接更新。沒有 NAS／電腦的使用者可用 iPhone 上的 Scriptable 更新：<https://roger9677gmail.github.io/tw-news-m3u/iphone-refresh.html>。iPhone 只在按下更新時取得官方網址，不需要常駐或代為轉送影片。
+
 ---
 
 ## A. 先把程式放進 GitHub

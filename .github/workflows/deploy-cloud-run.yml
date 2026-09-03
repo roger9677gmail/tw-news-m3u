@@ -90,6 +90,8 @@ jobs:
             LOG_LEVEL=INFO
             TZ=Asia/Taipei
             FOURGTV_CACHE_FILE=/var/secrets/fourgtv/streams.json
+            FOURGTV_CACHE_SECRET=tw-news-fourgtv-streams
+            GCP_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}
           secrets_update_strategy: overwrite
           secrets: |-
             ACCESS_KEY=tw-news-access-key:latest

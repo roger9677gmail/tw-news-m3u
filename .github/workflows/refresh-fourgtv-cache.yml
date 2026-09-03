@@ -2,8 +2,6 @@ name: Refresh 4GTV stream cache
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 * * * *"
 
 permissions:
   contents: read

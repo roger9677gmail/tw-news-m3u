@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1017">
+  <title>iPhone 更新直播｜台灣新聞 M3U Relay</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow"><span aria-hidden="true"></span> IPHONE REFRESH</p>
+      <h1>用 iPhone<br><em>更新直播</em></h1>
+      <p class="lead">iPhone 只負責短暫取得官方網址，不是伺服器；更新後關閉 App 也能繼續用途播。</p>
+      <div class="actions">
+        <a class="button primary" href="https://apps.apple.com/app/scriptable/id1405459188">安裝 Scriptable</a>
+        <button class="button" id="copy-script" type="button">複製更新程式</button>
+      </div>
+    </header>
+
+    <section class="panel explanation">
+      <p class="kicker">SETUP</p>
+      <h2>第一次設定</h2>
+      <p>安裝免費的 Scriptable，按上方「複製更新程式」，在 Scriptable 新增一個 Script 並貼上，名稱可填「更新新聞直播」。執行後輸入 Cloud Run 管理頁使用的 ACCESS_KEY。</p>
+      <p>之後若途播無法開台，只要先執行這個 Script；成功訊息出現後回到途播即可。權杖只保存在 iPhone Keychain，不會寫進程式碼。</p>
+      <p id="copy-status" aria-live="polite"></p>
+    </section>
+
+    <footer>
+      <a href="index.html">← 返回專案入口</a>
+      <a href="https://docs.scriptable.app/">Scriptable 官方文件</a>
+    </footer>
+  </main>
+  <script>
+    const button = document.querySelector("#copy-script");
+    const status = document.querySelector("#copy-status");
+    button.addEventListener("click", async () => {
+      try {
+        const response = await fetch("refresh-fourgtv.js", { cache: "no-store" });
+        const script = await response.text();
+        await navigator.clipboard.writeText(script);
+        status.textContent = "已複製。現在到 Scriptable 新增 Script 並貼上。";
+      } catch (error) {
+        status.innerHTML = '無法自動複製，請<a href="refresh-fourgtv.js">開啟程式碼</a>後全選複製。';
+      }
+    });
+  </script>
+</body>
+</html>

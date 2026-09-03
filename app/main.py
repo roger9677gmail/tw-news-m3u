@@ -13,6 +13,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 
 from .config import Channel, Settings, load_channels, load_settings
+from .cache_store import CacheStoreError, store_stream_cache
+from .fourgtv import FourGTVError, cache_from_client_responses, refresh_plan
 from .hls import (
     MediaTokenStore,
     UnsafeUpstreamURL,
@@ -415,6 +417,26 @@ def create_app(
                 "expires_at": iso_datetime(stream.expires_at),
             }
         )
+
+    @app.get("/api/fourgtv/refresh-plan")
+    async def fourgtv_refresh_plan(request: Request) -> dict[str, object]:
+        _require_access(request, settings)
+        return refresh_plan(channels)
+
+    @app.post("/api/fourgtv/refresh")
+    async def fourgtv_refresh(request: Request) -> JSONResponse:
+        _require_access(request, settings)
+        try:
+            payload = await request.json()
+            cache = cache_from_client_responses(channels, payload)
+            version = await store_stream_cache(cache)
+        except (FourGTVError, CacheStoreError, ValueError) as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        for channel in channels:
+            resolver.invalidate(channel.id)
+        cached_channels = cache.get("channels")
+        count = len(cached_channels) if isinstance(cached_channels, dict) else 0
+        return JSONResponse({"ok": True, "channels": count, "version": version})
 
     @app.api_route("/live.m3u", methods=["GET", "HEAD"])
     @app.api_route("/live.txt", methods=["GET", "HEAD"])

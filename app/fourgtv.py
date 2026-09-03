@@ -67,7 +67,11 @@ def _request_headers(encryption_key: str, now: datetime) -> dict[str, str]:
 
 def _stream_urls(payload: Any) -> list[str]:
     if not isinstance(payload, dict) or payload.get("Success") is not True:
-        message = payload.get("Message") if isinstance(payload, dict) else None
+        message = (
+            payload.get("ErrMessage") or payload.get("Message")
+            if isinstance(payload, dict)
+            else None
+        )
         raise FourGTVError(str(message or "官方 API 拒絕直播請求"))
     data = payload.get("Data")
     values = data.get("flstURLs") if isinstance(data, dict) else None
@@ -81,6 +85,74 @@ def _stream_urls(payload: Any) -> list[str]:
     if not urls:
         raise FourGTVError("官方 API 沒有可用的 HLS 網址")
     return urls
+
+
+def _request_body(channel: Channel, encryption_key: str) -> dict[str, object]:
+    return {
+        "fnCHANNEL_ID": channel.fourgtv_channel_id,
+        "fsDEVICE_TYPE": "mobile",
+        "clsAPP_IDENTITY_VALIDATE_ARUS": {
+            "fsVALUE": "",
+            "fsENC_KEY": encryption_key,
+        },
+        "fsASSET_ID": channel.fourgtv_asset_id,
+    }
+
+
+def refresh_plan(channels: tuple[Channel, ...]) -> dict[str, object]:
+    now = datetime.now(tz=UTC)
+    requests_to_make: list[dict[str, object]] = []
+    for channel in channels:
+        if not channel.fourgtv_channel_id or not channel.fourgtv_asset_id:
+            continue
+        encryption_key = str(uuid.uuid4()).upper()
+        requests_to_make.append(
+            {
+                "channel_id": channel.id,
+                "url": API_URL,
+                "headers": _request_headers(encryption_key, now),
+                "body": _request_body(channel, encryption_key),
+            }
+        )
+    return {"requests": requests_to_make}
+
+
+def cache_from_client_responses(
+    channels: tuple[Channel, ...], payload: Any
+) -> dict[str, object]:
+    from .hls import validate_upstream_url
+
+    values = payload.get("responses") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        raise FourGTVError("更新內容缺少 responses")
+
+    expected = {
+        channel.id
+        for channel in channels
+        if channel.fourgtv_channel_id and channel.fourgtv_asset_id
+    }
+    result: dict[str, dict[str, str]] = {}
+    for item in values:
+        channel_id = item.get("channel_id") if isinstance(item, dict) else None
+        response_payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(channel_id, str) or channel_id not in expected:
+            raise FourGTVError("更新內容含有未知頻道")
+        if channel_id in result:
+            raise FourGTVError(f"頻道 {channel_id} 重複")
+        url = _stream_urls(response_payload)[-1]
+        validate_upstream_url(url)
+        expiry = stream_expiry(url)
+        if expiry is None or expiry <= datetime.now(tz=UTC):
+            raise FourGTVError(f"頻道 {channel_id} 的直播網址已過期")
+        result[channel_id] = {"url": url, "expires_at": expiry.isoformat()}
+
+    missing = expected - result.keys()
+    if missing:
+        raise FourGTVError("更新內容缺少頻道：" + ", ".join(sorted(missing)))
+    return {
+        "generated_at": datetime.now(tz=UTC).replace(microsecond=0).isoformat(),
+        "channels": result,
+    }
 
 
 def stream_expiry(url: str) -> datetime | None:
@@ -121,15 +193,7 @@ def _fetch_stream_url(channel: Channel, timeout_seconds: float) -> str:
 
     encryption_key = str(uuid.uuid4()).upper()
     headers = _request_headers(encryption_key, datetime.now(tz=UTC))
-    body = {
-        "fnCHANNEL_ID": channel.fourgtv_channel_id,
-        "fsDEVICE_TYPE": "mobile",
-        "clsAPP_IDENTITY_VALIDATE_ARUS": {
-            "fsVALUE": "",
-            "fsENC_KEY": encryption_key,
-        },
-        "fsASSET_ID": channel.fourgtv_asset_id,
-    }
+    body = _request_body(channel, encryption_key)
     try:
         response = requests.post(
             API_URL,

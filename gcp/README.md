@@ -7,6 +7,8 @@
 
 > 目前預設的 8 個頻道使用 4GTV 官方行動直播來源，已避開 YouTube 對 Google 雲端 IP 的機器人驗證。自行新增的 YouTube 頻道仍可能受此限制。
 
+4GTV 會限制雲端主機直接更新短期網址。若沒有 NAS 或電腦，請依 [iPhone 更新工具](https://roger9677gmail.github.io/tw-news-m3u/iphone-refresh.html) 設定 Scriptable；需要看新聞時先執行一次，iPhone 不必常駐。
+
 ## 需求
 
 - 一個已啟用計費的 Google Cloud Project。
