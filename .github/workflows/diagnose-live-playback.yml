@@ -40,7 +40,7 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Probe every news channel with the production 4GTV cache
+      - name: Trace resolver, HLS manifests, and first media bytes
         shell: bash
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -101,95 +101,165 @@ jobs:
             --format='value(status.url)')"
           echo "Diagnostic URL: $SERVICE_URL"
 
-          echo
-          echo "=== Application readiness ==="
           curl --fail --silent --show-error --retry 8 --retry-delay 3 \
             "$SERVICE_URL/api/config"
           echo
 
           export SERVICE_URL ACCESS_KEY
-          echo
-          echo "=== Concurrent resolver probes for all configured news channels ==="
           python3 - <<'PY'
           import concurrent.futures
           import json
           import os
           import re
           import urllib.error
+          import urllib.parse
           import urllib.request
 
-          service = os.environ["SERVICE_URL"].rstrip("/")
-          key = os.environ["ACCESS_KEY"]
-          channels = [
-              "ftv-news", "pts-news", "tvbs-news", "setn-news",
-              "ctitv-news", "ebc-news", "global-news-tw", "era-news",
-          ]
+          SERVICE = os.environ["SERVICE_URL"].rstrip("/")
+          KEY = os.environ["ACCESS_KEY"]
+          BASE_HEADERS = {
+              "X-Access-Key": KEY,
+              "User-Agent": "tw-news-diagnostic/2",
+              "Cache-Control": "no-cache",
+          }
 
           def sanitize(value):
               text = str(value or "")
-              text = re.sub(r"([?&](?:key|token|sig|signature|expire|expires)=[^&\s\"']+)", "<redacted>", text, flags=re.I)
-              text = re.sub(r"https://[^\s|]+", lambda m: m.group(0).split("?", 1)[0], text)
+              text = re.sub(
+                  r"([?&](?:key|token|sig|signature|expire|expires)=[^&\s\"']+)",
+                  "<redacted>", text, flags=re.I,
+              )
+              text = re.sub(
+                  r"https://[^\s|]+",
+                  lambda match: match.group(0).split("?", 1)[0],
+                  text,
+              )
               return text[:3000]
 
-          def probe(channel):
-              req = urllib.request.Request(
-                  f"{service}/api/channels/{channel}/probe",
-                  method="POST",
-                  headers={"X-Access-Key": key, "User-Agent": "tw-news-diagnostic/1"},
+          def fetch(url, *, method="GET", max_bytes=262144, timeout=100):
+              request = urllib.request.Request(
+                  url,
+                  method=method,
+                  headers=BASE_HEADERS,
               )
               try:
-                  with urllib.request.urlopen(req, timeout=100) as response:
-                      code = response.status
-                      body = response.read().decode("utf-8", errors="replace")
+                  with urllib.request.urlopen(request, timeout=timeout) as response:
+                      body = response.read(max_bytes)
+                      return {
+                          "http": response.status,
+                          "content_type": response.headers.get("Content-Type", ""),
+                          "content_length": response.headers.get("Content-Length", ""),
+                          "body": body,
+                          "effective_url": response.geturl(),
+                      }
               except urllib.error.HTTPError as exc:
-                  code = exc.code
-                  body = exc.read().decode("utf-8", errors="replace")
+                  return {
+                      "http": exc.code,
+                      "content_type": exc.headers.get("Content-Type", ""),
+                      "content_length": exc.headers.get("Content-Length", ""),
+                      "body": exc.read(max_bytes),
+                      "effective_url": url,
+                  }
               except Exception as exc:
-                  return {"channel": channel, "http": 0, "ok": False, "error": sanitize(exc)}
+                  return {
+                      "http": 0,
+                      "content_type": "",
+                      "content_length": "",
+                      "body": str(exc).encode(),
+                      "effective_url": url,
+                  }
+
+          status_result = fetch(f"{SERVICE}/api/status", max_bytes=1024 * 1024)
+          status_payload = json.loads(status_result["body"].decode("utf-8"))
+          channels = [item["id"] for item in status_payload.get("channels", [])]
+          print("CONFIGURED_CHANNELS", json.dumps(channels, ensure_ascii=False))
+
+          def probe(channel):
+              result = fetch(
+                  f"{SERVICE}/api/channels/{channel}/probe",
+                  method="POST",
+                  max_bytes=1024 * 1024,
+              )
+              text = result["body"].decode("utf-8", errors="replace")
               try:
-                  payload = json.loads(body)
+                  payload = json.loads(text)
               except Exception:
-                  payload = {"error": body}
+                  payload = {"error": text}
               return {
                   "channel": channel,
-                  "http": code,
-                  "ok": code == 200 and bool(payload.get("ok", True)),
+                  "http": result["http"],
+                  "ok": result["http"] == 200 and bool(payload.get("ok", True)),
                   "title": payload.get("title"),
                   "height": payload.get("height"),
                   "error": sanitize(payload.get("error") or payload.get("detail") or ""),
               }
 
-          with concurrent.futures.ThreadPoolExecutor(max_workers=len(channels)) as pool:
-              results = list(pool.map(probe, channels))
+          with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(channels))) as pool:
+              probe_results = list(pool.map(probe, channels))
 
-          print(json.dumps(results, ensure_ascii=False, indent=2))
+          print("PROBE_RESULTS")
+          print(json.dumps(probe_results, ensure_ascii=False, indent=2))
+
+          def first_uri(manifest_text, current_url):
+              for raw in manifest_text.splitlines():
+                  line = raw.strip()
+                  if line and not line.startswith("#"):
+                      return urllib.parse.urljoin(current_url, line)
+              return None
+
+          def trace_hls(channel):
+              current_url = f"{SERVICE}/hls/{channel}/master.m3u8"
+              levels = []
+              for depth in range(4):
+                  result = fetch(current_url, max_bytes=512 * 1024, timeout=120)
+                  body = result["body"]
+                  content_type = result["content_type"]
+                  is_manifest = body.lstrip().startswith(b"#EXTM3U")
+                  level = {
+                      "depth": depth,
+                      "http": result["http"],
+                      "content_type": content_type,
+                      "declared_length": result["content_length"],
+                      "bytes_read": len(body),
+                      "is_manifest": is_manifest,
+                  }
+                  if result["http"] not in (200, 206):
+                      level["error_body"] = sanitize(body.decode("utf-8", errors="replace"))
+                      levels.append(level)
+                      return {"channel": channel, "ok": False, "levels": levels}
+                  levels.append(level)
+                  if not is_manifest:
+                      return {
+                          "channel": channel,
+                          "ok": len(body) > 0,
+                          "levels": levels,
+                      }
+                  text = body.decode("utf-8", errors="replace")
+                  next_url = first_uri(text, result["effective_url"])
+                  if not next_url:
+                      levels[-1]["error"] = "manifest has no media URI"
+                      return {"channel": channel, "ok": False, "levels": levels}
+                  current_url = next_url
+              return {
+                  "channel": channel,
+                  "ok": False,
+                  "levels": levels,
+                  "error": "manifest nesting exceeded diagnostic limit",
+              }
+
+          online_channels = [item["channel"] for item in probe_results if item["ok"]]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(online_channels))) as pool:
+              hls_results = list(pool.map(trace_hls, online_channels))
+
+          print("HLS_RESULTS")
+          print(json.dumps(hls_results, ensure_ascii=False, indent=2))
           print("SUMMARY", json.dumps({
-              "total": len(results),
-              "ok": sum(bool(item["ok"]) for item in results),
-              "failed": sum(not bool(item["ok"]) for item in results),
+              "configured": len(channels),
+              "resolved": len(online_channels),
+              "resolver_failed": len(channels) - len(online_channels),
+              "hls_end_to_end_ok": sum(bool(item["ok"]) for item in hls_results),
+              "hls_failed": sum(not bool(item["ok"]) for item in hls_results),
           }, ensure_ascii=False))
-          PY
-
-          echo
-          echo "=== Resolver state and selected upstream source ==="
-          curl --fail --silent --show-error \
-            --header "X-Access-Key: $ACCESS_KEY" \
-            "$SERVICE_URL/api/status" > /tmp/status.json
-          python3 - <<'PY'
-          import json
-          import re
-
-          data = json.load(open('/tmp/status.json', encoding='utf-8'))
-          print('Status summary:', data.get('summary'))
-          for item in data.get('channels', []):
-              error = str(item.get('error') or '')
-              error = re.sub(r'https://[^\s|]+', lambda m: m.group(0).split('?', 1)[0], error)
-              print(json.dumps({
-                  'id': item.get('id'),
-                  'state': item.get('state'),
-                  'source': item.get('source'),
-                  'error': error[:2000],
-              }, ensure_ascii=False))
           PY
 
           echo
@@ -197,6 +267,6 @@ jobs:
           gcloud run services logs read "$DIAG_SERVICE" \
             --project "$PROJECT_ID" \
             --region "$REGION" \
-            --limit 300 2>/dev/null \
-            | grep -Ei 'cache unavailable|resolved |unable to resolve|fourgtv|youtube|confirm|403|expired|過期|失敗' \
-            | tail -160 || true
+            --limit 400 2>/dev/null \
+            | grep -Ei 'cache unavailable|resolved |unable to resolve|fourgtv|youtube|confirm|403|404|502|expired|過期|失敗|upstream' \
+            | tail -200 || true
