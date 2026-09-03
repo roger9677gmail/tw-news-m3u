@@ -52,7 +52,6 @@ PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(project
 BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-# New projects can take a short time to create the Compute Engine default service account.
 for _ in $(seq 1 20); do
   if gcloud iam service-accounts describe "$BUILD_SA" --project "$PROJECT_ID" >/dev/null 2>&1; then
     break
@@ -109,7 +108,6 @@ elif [[ "$SECRET_EXISTS" == "false" ]]; then
     --project "$PROJECT_ID" >/dev/null
 fi
 
-# The container, not the public caller, is allowed to read the secret.
 gcloud secrets add-iam-policy-binding "$SECRET_NAME" \
   --member="serviceAccount:${RUNTIME_SA}" \
   --role="roles/secretmanager.secretAccessor" \
@@ -134,6 +132,9 @@ gcloud run deploy "$SERVICE" \
   --region "$REGION" \
   --platform managed \
   --allow-unauthenticated \
+  --no-invoker-iam-check \
+  --no-iap \
+  --default-url \
   --ingress all \
   --service-account "$RUNTIME_SA" \
   --port 8080 \
@@ -149,32 +150,6 @@ gcloud run deploy "$SERVICE" \
   --set-env-vars="APP_NAME=台灣新聞直播 M3U,MAX_HEIGHT=720,RESOLVER_TTL_SECONDS=900,RESOLVER_FAILURE_TTL_SECONDS=90,RESOLVER_TIMEOUT_SECONDS=100,MAX_RESOLVER_CONCURRENCY=2,MEDIA_TOKEN_TTL_SECONDS=21600,MAX_TOKEN_ENTRIES=30000,UPSTREAM_TIMEOUT_SECONDS=25,LOG_LEVEL=INFO,TZ=Asia/Taipei" \
   --quiet
 
-SERVICE_URL="$(gcloud run services describe "$SERVICE" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --format='value(status.url)')"
-[[ -n "$SERVICE_URL" ]] || fail "部署完成但沒有取得服務網址。"
-
-log "檢查服務"
-curl --fail --silent --show-error --retry 5 --retry-delay 3 \
-  "$SERVICE_URL/healthz" >/dev/null
-
-PLAYLIST_URL="${SERVICE_URL}/live.m3u?key=${ACCESS_KEY}"
-umask 077
-printf '%s\n' "$PLAYLIST_URL" > "$URL_FILE"
-
-cat <<EOF
-
-部署完成。
-
-網站：
-${SERVICE_URL}
-
-給途播的 M3U 網址：
-${PLAYLIST_URL}
-
-網址已另存於：
-${URL_FILE}
-
-注意：YouTube 仍可能要求雲端 IP 驗證。請先打開網站，輸入權杖後測試一個新聞台。
-EOF
+PROJECT_ID="$PROJECT_ID" REGION="$REGION" SERVICE="$SERVICE" \
+  SECRET_NAME="$SECRET_NAME" URL_FILE="$URL_FILE" \
+  bash gcp/finalize-cloud-run.sh
