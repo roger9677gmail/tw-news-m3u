@@ -20,7 +20,7 @@ COPY --from=pot-provider /usr/local/bin/node /usr/local/bin/node
 COPY --from=pot-provider /app /opt/bgutil-provider
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && apt-get install -y --no-install-recommends ca-certificates libatomic1 tini \
     && rm -rf /var/lib/apt/lists/* \
     && deno --version \
     && node --version
