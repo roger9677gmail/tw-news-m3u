@@ -2,9 +2,8 @@
 set -Eeuo pipefail
 
 # Finish an existing Cloud Run deployment and choose the Cloud Run URL that
-# actually reaches the service. Cloud Run can expose both a legacy hashed URL
-# and a newer project-number URL; during URL migration one may temporarily
-# return Google's generic 404 page even while the service is Ready.
+# actually reaches the service. Cloud Run reserves some URL paths ending in z,
+# so the public smoke test uses /api/config instead of /healthz.
 
 REGION="${REGION:-asia-east1}"
 SERVICE="${SERVICE:-tw-news-m3u}"
@@ -106,13 +105,13 @@ SERVICE_URL=""
 LAST_CODE=""
 LAST_URL=""
 
-log "逐一測試 /healthz，選出可用網址"
+log "逐一測試 /api/config，選出可用網址"
 for round in $(seq 1 8); do
   for base_url in "${CANDIDATE_URLS[@]}"; do
     safe_name="$(printf '%s' "$base_url" | sha256sum | cut -c1-12)"
     body_file="$TMP_DIR/body-$safe_name"
     header_file="$TMP_DIR/header-$safe_name"
-    probe_url="${base_url}/healthz?probe=$(date +%s)-${round}"
+    probe_url="${base_url}/api/config?probe=$(date +%s)-${round}"
 
     result="$(curl \
       --silent \
@@ -133,7 +132,7 @@ for round in $(seq 1 8); do
     printf '第 %s 輪：%s -> HTTP %s\n' "$round" "$base_url" "${code:-連線失敗}"
 
     if [[ "$code" == "200" ]] \
-        && grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$body_file"; then
+        && grep -Eq '"channel_count"[[:space:]]*:[[:space:]]*[0-9]+' "$body_file"; then
       SERVICE_URL="$base_url"
       break 2
     fi
@@ -165,7 +164,7 @@ PY
     --region "$REGION" \
     --limit=100 >&2 || true
 
-  fail "Cloud Run 已 Ready，但所有回報網址仍無法連到 /healthz。"
+  fail "Cloud Run 已 Ready，但所有回報網址仍無法連到 /api/config。"
 fi
 
 printf '\n採用可用網址：%s\n' "$SERVICE_URL"
@@ -198,7 +197,7 @@ PLAYLIST_CODE="$(curl \
 if [[ "$PLAYLIST_CODE" != "200" ]] || ! grep -q '^#EXTM3U' "$PLAYLIST_BODY"; then
   printf '\nM3U 檢查失敗：HTTP %s\n' "${PLAYLIST_CODE:-連線失敗}" >&2
   sed -n '1,20p' "$PLAYLIST_BODY" >&2 || true
-  fail "服務健康，但 M3U 清單無法讀取。"
+  fail "服務可以連線，但 M3U 清單無法讀取。"
 fi
 
 umask 077
