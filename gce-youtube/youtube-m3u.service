@@ -1,0 +1,23 @@
+[Unit]
+Description=YouTube to M3U relay
+After=network-online.target bgutil-provider.service
+Wants=network-online.target bgutil-provider.service
+
+[Service]
+Type=simple
+User=ytm3u
+Group=ytm3u
+WorkingDirectory=/opt/youtube-m3u
+EnvironmentFile=/etc/youtube-m3u.env
+ExecStart=/opt/youtube-m3u/venv/bin/uvicorn app:app --host=127.0.0.1 --port=8788 --proxy-headers --forwarded-allow-ips=127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/youtube-m3u
+
+[Install]
+WantedBy=multi-user.target

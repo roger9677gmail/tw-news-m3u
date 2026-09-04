@@ -1,0 +1,21 @@
+[Unit]
+Description=YouTube PO Token provider
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ytm3u
+Group=ytm3u
+WorkingDirectory=/opt/bgutil-ytdlp-pot-provider/server
+ExecStart=/usr/bin/node /opt/bgutil-ytdlp-pot-provider/server/build/main.js --port 4416
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+
