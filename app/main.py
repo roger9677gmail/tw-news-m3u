@@ -95,8 +95,36 @@ def _safe_channel_id(channel_id: str, resolver: YouTubeResolver) -> Channel:
         raise HTTPException(status_code=404, detail="找不到頻道") from exc
 
 
-def _proxy_media_url(base_url: str, access_key: str, channel_id: str, token: str) -> str:
-    path = f"{base_url}/media/{urllib.parse.quote(channel_id, safe='')}/{urllib.parse.quote(token, safe='')}"
+def _proxy_media_url(
+    base_url: str,
+    access_key: str,
+    channel_id: str,
+    token: str,
+    source_url: str,
+) -> str:
+    parsed = urllib.parse.urlparse(source_url)
+    suffix = Path(parsed.path).suffix.lower()
+    if parsed.hostname == "4gtv.cnlive.club" and suffix == ".jpeg":
+        suffix = ".ts"
+    if suffix not in {
+        ".m3u8",
+        ".m3u",
+        ".ts",
+        ".m2ts",
+        ".m4s",
+        ".mp4",
+        ".aac",
+        ".ac3",
+        ".ec3",
+        ".vtt",
+        ".webvtt",
+        ".key",
+    }:
+        suffix = ".bin"
+    media_name = urllib.parse.quote(token, safe="") + suffix
+    path = (
+        f"{base_url}/media/{urllib.parse.quote(channel_id, safe='')}/{media_name}"
+    )
     return _append_key(path, access_key)
 
 
@@ -336,8 +364,8 @@ async def _proxy_response(
             channel_id=channel_id,
             headers=headers,
             token_store=token_store,
-            proxy_url=lambda cid, token: _proxy_media_url(
-                base, access_key, cid, token
+            proxy_url=lambda cid, token, source_url: _proxy_media_url(
+                base, access_key, cid, token, source_url
             ),
             max_height=settings.max_height,
         )
@@ -714,10 +742,15 @@ def create_app(
             headers={"Cache-Control": "private, max-age=86400"},
         )
 
-    @app.api_route("/media/{channel_id}/{token}", methods=["GET", "HEAD"])
-    async def proxied_media(channel_id: str, token: str, request: Request) -> Response:
+    @app.api_route("/media/{channel_id}/{token_with_suffix}", methods=["GET", "HEAD"])
+    async def proxied_media(
+        channel_id: str, token_with_suffix: str, request: Request
+    ) -> Response:
         key = _require_access(request, settings)
         _safe_channel_id(channel_id, resolver)
+        # URL-safe token values never contain a dot. The suffix lets strict
+        # HLS/FFmpeg clients identify the resource before reading its headers.
+        token = token_with_suffix.split(".", 1)[0]
         item = app.state.token_store.get(channel_id, token)
         if item is None:
             raise HTTPException(status_code=410, detail="媒體網址已過期，請重新載入頻道")

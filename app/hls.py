@@ -171,7 +171,7 @@ def _rewrite_uri(
     channel_id: str,
     headers: Mapping[str, str],
     token_store: MediaTokenStore,
-    proxy_url: Callable[[str, str], str],
+    proxy_url: Callable[[str, str, str], str],
 ) -> str:
     stripped = value.strip()
     if not stripped or stripped.startswith(("data:", "skd:", "urn:")):
@@ -182,7 +182,7 @@ def _rewrite_uri(
     except UnsafeUpstreamURL:
         # Do not turn an unexpected third-party URI into an open proxy.
         return value
-    return proxy_url(channel_id, token)
+    return proxy_url(channel_id, token, absolute)
 
 
 def rewrite_hls_manifest(
@@ -192,7 +192,7 @@ def rewrite_hls_manifest(
     channel_id: str,
     headers: Mapping[str, str],
     token_store: MediaTokenStore,
-    proxy_url: Callable[[str, str], str],
+    proxy_url: Callable[[str, str, str], str],
     max_height: int | None = None,
 ) -> bytes:
     text = body.decode("utf-8", errors="replace")

@@ -50,7 +50,7 @@ video/index.m3u8
         channel_id="tvbs-news",
         headers={"User-Agent": "test"},
         token_store=store,
-        proxy_url=lambda channel, token: f"https://relay.example/media/{channel}/{token}?key=secret",
+        proxy_url=lambda channel, token, source: f"https://relay.example/media/{channel}/{token}?key=secret",
     ).decode()
 
     assert rewritten.startswith("#EXTM3U\n")
@@ -70,7 +70,7 @@ def test_rewrite_manifest_does_not_proxy_untrusted_host() -> None:
         channel_id="news",
         headers={},
         token_store=store,
-        proxy_url=lambda channel, token: f"/media/{channel}/{token}",
+        proxy_url=lambda channel, token, source: f"/media/{channel}/{token}",
     ).decode()
     assert "https://evil.example/segment.ts" in rewritten
     assert len(store) == 0
@@ -91,7 +91,7 @@ video-1080.m3u8
         channel_id="news",
         headers={},
         token_store=store,
-        proxy_url=lambda channel, token: f"/media/{channel}/{token}",
+        proxy_url=lambda channel, token, source: f"/media/{channel}/{token}",
         max_height=720,
     ).decode()
 

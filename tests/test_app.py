@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Channel, Settings
 from app.karaoke import KaraokeSong
-from app.main import _media_content_type, create_app
+from app.main import _media_content_type, _proxy_media_url, create_app
 
 
 def settings(tmp_path: Path, *, key: str = "test-secret") -> Settings:
@@ -65,6 +65,18 @@ def test_experimental_masked_segment_is_forwarded_as_mpeg_ts() -> None:
     )
 
     assert _media_content_type(response) == "video/mp2t"
+
+
+def test_experimental_masked_segment_proxy_url_uses_ts_extension() -> None:
+    url = _proxy_media_url(
+        "https://relay.example",
+        "secret",
+        "tvbs-news",
+        "media-token",
+        "http://4gtv.cnlive.club/ts/channel.123.jpeg",
+    )
+
+    assert "/media/tvbs-news/media-token.ts?" in url
 
 
 def test_ts_segment_with_incorrect_text_type_is_forwarded_as_mpeg_ts() -> None:
@@ -220,6 +232,7 @@ def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
         )
 
         parsed_master = urllib.parse.urlparse(master_media_url)
+        assert parsed_master.path.endswith(".m3u8")
         variant = client.get(parsed_master.path + "?" + parsed_master.query)
         assert variant.status_code == 200
         assert "segment-001.ts" not in variant.text
@@ -228,6 +241,7 @@ def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
         )
 
         parsed_segment = urllib.parse.urlparse(segment_url)
+        assert parsed_segment.path.endswith(".ts")
         segment = client.get(parsed_segment.path + "?" + parsed_segment.query)
         assert segment.status_code == 200
         assert segment.content == segment_bytes
