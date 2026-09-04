@@ -14,7 +14,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import Channel, Settings, load_channels, load_settings
 from .cache_store import CacheStoreError, store_stream_cache
-from .fourgtv import FourGTVError, cache_from_client_responses, refresh_plan
+from .fourgtv import (
+    FourGTVError,
+    cache_from_client_responses,
+    install_runtime_cache,
+    refresh_plan,
+)
 from .hls import (
     MediaTokenStore,
     UnsafeUpstreamURL,
@@ -544,6 +549,7 @@ def create_app(
             payload = await request.json()
             cache = cache_from_client_responses(channels, payload)
             version = await store_stream_cache(cache)
+            install_runtime_cache(cache)
         except (FourGTVError, CacheStoreError, ValueError) as exc:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
         for channel in channels:

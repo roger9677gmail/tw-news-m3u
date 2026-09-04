@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import urllib.parse
 import uuid
 from datetime import UTC, date, datetime
@@ -38,6 +39,8 @@ _ENCRYPTED_APP_SECRET = (
     "PyPJU25iI2IQCMWq7kblwh9sGCypqsxMp4sKjJo95SK43h08ff+j1nbWliTySSB+"
     "N67BnXrYv9DfwK+ue5wWkg=="
 )
+_RUNTIME_CACHE_LOCK = threading.RLock()
+_RUNTIME_CACHE: dict[str, str] = {}
 
 
 class FourGTVError(RuntimeError):
@@ -177,6 +180,38 @@ def stream_expiry(url: str) -> datetime | None:
     return None
 
 
+def install_runtime_cache(payload: dict[str, object]) -> None:
+    """Make a just-refreshed client cache usable before the secret mount updates."""
+    raw_channels = payload.get("channels")
+    if not isinstance(raw_channels, dict):
+        raise FourGTVError("官方直播快取缺少 channels")
+    updated: dict[str, str] = {}
+    for channel_id, entry in raw_channels.items():
+        url = entry.get("url") if isinstance(entry, dict) else None
+        if not isinstance(channel_id, str) or not isinstance(url, str):
+            raise FourGTVError("官方直播快取格式錯誤")
+        expiry = stream_expiry(url)
+        if not url.startswith("https://") or not expiry or expiry <= datetime.now(tz=UTC):
+            raise FourGTVError(f"頻道 {channel_id} 的直播網址無效或已過期")
+        updated[channel_id] = url
+    with _RUNTIME_CACHE_LOCK:
+        _RUNTIME_CACHE.clear()
+        _RUNTIME_CACHE.update(updated)
+
+
+def _runtime_stream_url(channel: Channel) -> str | None:
+    with _RUNTIME_CACHE_LOCK:
+        url = _RUNTIME_CACHE.get(channel.id)
+    if not url:
+        return None
+    expiry = stream_expiry(url)
+    if expiry and expiry > datetime.now(tz=UTC):
+        return url
+    with _RUNTIME_CACHE_LOCK:
+        _RUNTIME_CACHE.pop(channel.id, None)
+    return None
+
+
 def _cached_stream_url(channel: Channel, cache_path: Path) -> str:
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -221,7 +256,10 @@ def _fetch_stream_url(channel: Channel, timeout_seconds: float) -> str:
 async def resolve_fourgtv(channel: Channel, timeout_seconds: float = 15.0) -> ResolvedStream:
     cache_file = os.getenv("FOURGTV_CACHE_FILE", "").strip()
     source = "4GTV 官方行動直播"
-    if cache_file:
+    stream_url = _runtime_stream_url(channel)
+    if stream_url:
+        source = "4GTV 官方快取直播"
+    elif cache_file:
         try:
             stream_url = await asyncio.to_thread(
                 _cached_stream_url, channel, Path(cache_file)

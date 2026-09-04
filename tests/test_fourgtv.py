@@ -12,6 +12,7 @@ from app.fourgtv import (
     _stream_urls,
     cache_from_client_responses,
     daily_auth,
+    install_runtime_cache,
     refresh_plan,
     resolve_fourgtv,
 )
@@ -77,6 +78,38 @@ def test_resolve_uses_mounted_secret_cache(tmp_path, monkeypatch) -> None:
     assert stream.source == "4GTV 官方快取直播"
     assert stream.expires_at is not None
     assert stream.expires_at.year == 2100
+
+
+def test_just_refreshed_runtime_cache_overrides_secret_mount(
+    tmp_path, monkeypatch
+) -> None:
+    mounted = tmp_path / "streams.json"
+    mounted.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "test-news": {
+                        "url": "https://4gtvfreemobile-mozai.4gtv.tv/old/index.m3u8?expires=4102444800"
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FOURGTV_CACHE_FILE", str(mounted))
+    fresh_url = (
+        "https://4gtvfreemobile-cds.cdn.hinet.net/fresh/index.m3u8"
+        "?expires=4102444800"
+    )
+    install_runtime_cache(
+        {"channels": {"test-news": {"url": fresh_url}}}
+    )
+    try:
+        stream = asyncio.run(resolve_fourgtv(mapped_channel()))
+        assert stream.stream_url == fresh_url
+        assert stream.source == "4GTV 官方快取直播"
+    finally:
+        install_runtime_cache({"channels": {}})
 
 
 def test_refresh_plan_and_client_response_cache() -> None:
