@@ -139,6 +139,7 @@ def test_key_is_optional_when_not_configured(tmp_path: Path) -> None:
 
 def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
     import asyncio
+    import gzip
     import urllib.parse
     from datetime import UTC, datetime, timedelta
 
@@ -181,6 +182,7 @@ def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
             return {"test-news": self.status}
 
     segment_bytes = b"\x00\x01fake-mpeg-ts-data"
+    compressed_segment = gzip.compress(segment_bytes)
 
     class StaticAsyncStream(httpx.AsyncByteStream):
         def __init__(self, content: bytes) -> None:
@@ -191,6 +193,7 @@ def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
 
     def upstream(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("user-agent") == "relay-test"
+        assert request.headers.get("accept-encoding") == "identity"
         path = request.url.path
         if path == "/master.m3u8":
             return httpx.Response(
@@ -209,8 +212,12 @@ def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
         if path == "/segment-001.ts":
             return httpx.Response(
                 200,
-                headers={"Content-Type": "video/mp2t", "Content-Length": str(len(segment_bytes))},
-                stream=StaticAsyncStream(segment_bytes),
+                headers={
+                    "Content-Type": "video/mp2t",
+                    "Content-Encoding": "gzip",
+                    "Content-Length": str(len(compressed_segment)),
+                },
+                stream=StaticAsyncStream(compressed_segment),
                 request=request,
             )
         return httpx.Response(404, request=request)

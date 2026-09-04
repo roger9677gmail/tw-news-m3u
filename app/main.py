@@ -193,6 +193,7 @@ def _status_payload(channels: tuple[Channel, ...], resolver: YouTubeResolver) ->
 
 def _upstream_headers(base: Mapping[str, str], request: Request) -> dict[str, str]:
     blocked = {
+        "accept-encoding",
         "authorization",
         "connection",
         "content-length",
@@ -210,6 +211,10 @@ def _upstream_headers(base: Mapping[str, str], request: Request) -> dict[str, st
         if key.lower() in PASSTHROUGH_REQUEST_HEADERS:
             headers[key] = value
     headers.setdefault("Accept", "*/*")
+    # Compressed MPEG-TS is legal HTTP but several small IPTV origins apply
+    # Brotli to full segment responses only. Request identity so the relay
+    # never forwards compressed media bytes without a matching encoding.
+    headers["Accept-Encoding"] = "identity"
     return headers
 
 
@@ -225,6 +230,8 @@ def _response_headers(response: httpx.Response, *, manifest: bool) -> dict[str, 
         headers["Content-Type"] = "application/vnd.apple.mpegurl; charset=utf-8"
         headers["Cache-Control"] = "no-store, max-age=0"
     else:
+        if response.headers.get("content-encoding"):
+            headers.pop("content-length", None)
         headers["Cache-Control"] = "private, max-age=20"
     return headers
 
@@ -254,7 +261,9 @@ async def _close_upstream(response: httpx.Response) -> None:
 
 async def _stream_body(response: httpx.Response) -> AsyncIterator[bytes]:
     try:
-        async for chunk in response.aiter_raw():
+        # `aiter_bytes` transparently decodes any compression an upstream
+        # applies despite Accept-Encoding: identity.
+        async for chunk in response.aiter_bytes():
             if chunk:
                 yield chunk
     finally:
