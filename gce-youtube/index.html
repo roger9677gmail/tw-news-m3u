@@ -145,7 +145,7 @@
     if (!key()) return notify('請先輸入播放權杖。',true);
     if (!urls.length) return notify('請輸入 YouTube 網址。',true);
     if (!els.rights.checked) return notify('請確認你擁有使用與轉播權利。',true);
-    els.add.disabled=true; notify('正在從這台 VM 測試並解析 YouTube…');
+    els.add.disabled=true; notify('正在從雲端服務測試並解析 YouTube…');
     try {
       const data = await request('/api/items',{method:'POST',body:JSON.stringify({urls,rights_confirmed:true})});
       const failed = data.results.filter(x=>!x.ok);

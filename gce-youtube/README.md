@@ -1,6 +1,21 @@
-# 途播授權串流管理站：Compute Engine
+# 途播授權串流管理站
 
 這個服務只供使用者已取得使用及轉播權利的內容使用。它提供手機管理頁、受權杖保護的 M3U、HLS/M3U8 原樣代理，以及 YouTube 單一並行 HLS 封裝。
+
+## Cloud Run（建議用於授權 HLS）
+
+Cloud Run 版使用本目錄的 `Dockerfile`，並以私人 Cloud Storage object 永久保存節目清單。容器重新部署或縮至零都不會遺失新增項目。
+
+必要環境變數：
+
+- `ACCESS_KEY`：至少 20 個字元，正式環境應由 Secret Manager 提供。
+- `PUBLIC_BASE_URL`：Cloud Run 服務的正式 HTTPS 網址。
+- `CATALOG_BUCKET`：保存私人節目清單的 Cloud Storage bucket。
+- `CATALOG_OBJECT`：預設為 `catalog/catalog.json`。
+
+為避免多個執行個體同時修改同一份小型清單，部署時將最大執行個體設為 1。公開 HLS 來源由 Cloud Run 即時代理，影片本身不寫入容器的暫存檔案。
+
+YouTube 即時封裝仍使用暫存分段，可能遇到 YouTube 對公有雲 IP 的限制；此模式以 Compute Engine 版較穩定。
 
 ## HLS／M3U8 管理
 

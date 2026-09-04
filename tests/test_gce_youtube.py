@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -85,6 +86,36 @@ class FakeHlsGateway:
         raise AssertionError("not used")
 
 
+class FakeBlob:
+    def __init__(self, initial: str | None = None):
+        self.body = initial
+
+    def exists(self, client=None):
+        return self.body is not None
+
+    def download_as_text(self, encoding="utf-8"):
+        return self.body or ""
+
+    def upload_from_string(self, body, content_type=None):
+        self.body = body
+
+
+class FakeBucket:
+    def __init__(self, blob):
+        self._blob = blob
+
+    def blob(self, object_name):
+        return self._blob
+
+
+class FakeStorageClient:
+    def __init__(self, blob):
+        self._blob = blob
+
+    def bucket(self, bucket_name):
+        return FakeBucket(self._blob)
+
+
 def test_admin_catalog_and_playlist(tmp_path: Path) -> None:
     settings = MODULE.Settings(
         access_key="test-key-that-is-long-enough",
@@ -132,6 +163,7 @@ def test_admin_catalog_and_playlist(tmp_path: Path) -> None:
         assert "授權測試影片" not in client.get(
             "/live.m3u?key=test-key-that-is-long-enough"
         ).text
+        assert client.get("/health").json()["catalog"] == "local"
 
 
 def test_youtube_url_validation() -> None:
@@ -147,6 +179,26 @@ def test_youtube_url_validation() -> None:
             pass
         else:
             raise AssertionError(f"accepted unsafe URL: {value}")
+
+
+def test_storage_catalog_persists_mutations() -> None:
+    blob = FakeBlob()
+    catalog = MODULE.StorageCatalog(
+        "private-catalog", "catalog/catalog.json", client=FakeStorageClient(blob)
+    )
+    item = {
+        "id": "hls-persistent",
+        "title": "永久節目",
+        "url": "https://media.example/video.m3u8",
+        "added_at": "2026-09-04T00:00:00Z",
+    }
+    catalog.add(item)
+    reloaded = MODULE.StorageCatalog(
+        "private-catalog", "catalog/catalog.json", client=FakeStorageClient(blob)
+    )
+    assert reloaded.get("hls-persistent")["title"] == "永久節目"
+    assert reloaded.remove("hls-persistent") is True
+    assert json.loads(blob.body) == []
 
 
 def test_hls_catalog_playlist_probe_and_delete(tmp_path: Path) -> None:

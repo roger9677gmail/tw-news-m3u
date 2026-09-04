@@ -56,6 +56,8 @@ class Settings:
     access_key: str
     public_base_url: str
     data_dir: Path
+    catalog_bucket: str = ""
+    catalog_object: str = "catalog/catalog.json"
     max_height: int = 720
     resolver_timeout_seconds: int = 50
     startup_timeout_seconds: int = 35
@@ -74,6 +76,11 @@ class Settings:
             access_key=access_key,
             public_base_url=public_base_url,
             data_dir=Path(os.getenv("DATA_DIR", "/var/lib/youtube-m3u")).expanduser(),
+            catalog_bucket=os.getenv("CATALOG_BUCKET", "").strip(),
+            catalog_object=(
+                os.getenv("CATALOG_OBJECT", "catalog/catalog.json").strip().lstrip("/")
+                or "catalog/catalog.json"
+            ),
             max_height=max(144, min(int(os.getenv("MAX_HEIGHT", "720")), 720)),
             resolver_timeout_seconds=max(
                 20, min(int(os.getenv("RESOLVER_TIMEOUT_SECONDS", "50")), 120)
@@ -193,6 +200,70 @@ class Catalog:
             if len(remaining) == len(items):
                 return False
             self._write(remaining)
+            return True
+
+
+class StorageCatalog:
+    """Persistent catalog stored in a private Cloud Storage object."""
+
+    def __init__(
+        self, bucket_name: str, object_name: str, *, client: Any | None = None
+    ) -> None:
+        if not bucket_name:
+            raise ValueError("CATALOG_BUCKET 不可空白")
+        if client is None:
+            from google.cloud import storage
+
+            client = storage.Client()
+        self._client = client
+        self._blob = client.bucket(bucket_name).blob(object_name)
+        self._lock = threading.RLock()
+        self._items = self._load()
+
+    def _load(self) -> list[dict[str, Any]]:
+        if not self._blob.exists(client=self._client):
+            self._write([])
+            return []
+        try:
+            value = json.loads(self._blob.download_as_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Cloud Storage 節目清單格式損壞") from exc
+        if not isinstance(value, list):
+            raise RuntimeError("Cloud Storage 節目清單格式不正確")
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    def _write(self, items: list[dict[str, Any]]) -> None:
+        body = json.dumps(items, ensure_ascii=False, indent=2) + "\n"
+        self._blob.upload_from_string(
+            body,
+            content_type="application/json; charset=utf-8",
+        )
+
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(item) for item in self._items]
+
+    def get(self, item_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.list() if item.get("id") == item_id), None)
+
+    def add(self, item: dict[str, Any]) -> None:
+        with self._lock:
+            prior = next((x for x in self._items if x.get("id") == item["id"]), None)
+            value = dict(item)
+            if prior:
+                value["added_at"] = prior.get("added_at") or value["added_at"]
+            updated = [x for x in self._items if x.get("id") != value["id"]]
+            updated.append(value)
+            self._write(updated)
+            self._items = updated
+
+    def remove(self, item_id: str) -> bool:
+        with self._lock:
+            updated = [item for item in self._items if item.get("id") != item_id]
+            if len(updated) == len(self._items):
+                return False
+            self._write(updated)
+            self._items = updated
             return True
 
 
@@ -752,14 +823,18 @@ def _with_key(url: str, key: str) -> str:
 def create_app(
     *,
     settings: Settings | None = None,
-    catalog: Catalog | None = None,
+    catalog: Catalog | StorageCatalog | None = None,
     resolver: ResolverProtocol | None = None,
     streams: StreamManagerProtocol | None = None,
     hls_gateway: HlsGatewayProtocol | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    catalog = catalog or Catalog(settings.data_dir / "catalog.json")
+    catalog = catalog or (
+        StorageCatalog(settings.catalog_bucket, settings.catalog_object)
+        if settings.catalog_bucket
+        else Catalog(settings.data_dir / "catalog.json")
+    )
     resolver = resolver or YouTubeResolver(settings)
     streams = streams or StreamManager(settings, resolver)
     hls_gateway = hls_gateway or HlsGateway(settings)
@@ -786,9 +861,15 @@ def create_app(
     async def dashboard() -> FileResponse:
         return FileResponse(ROOT / "index.html", media_type="text/html")
 
+    @app.get("/health")
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
-        return {"ok": True, "items": len(catalog.list()), "max_height": settings.max_height}
+        return {
+            "ok": True,
+            "items": len(catalog.list()),
+            "max_height": settings.max_height,
+            "catalog": "cloud-storage" if settings.catalog_bucket else "local",
+        }
 
     @app.get("/api/config")
     async def api_config() -> dict[str, Any]:
