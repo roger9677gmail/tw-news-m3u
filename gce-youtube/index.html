@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>YouTube 轉 M3U 測試站</title>
+  <title>途播授權串流管理站</title>
   <style>
     :root { color-scheme: dark; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#0b1020; color:#eef2ff; }
     * { box-sizing:border-box; }
@@ -14,7 +14,7 @@
     p { color:#aeb9d8; line-height:1.6; }
     .panel { background:#151d35; border:1px solid #2a365d; border-radius:18px; padding:20px; margin:18px 0; box-shadow:0 16px 45px #0005; }
     label { display:block; font-weight:700; margin:10px 0 7px; }
-    input,textarea,button { width:100%; border-radius:11px; border:1px solid #3b4b78; font:inherit; }
+    input,textarea,button,details { width:100%; border-radius:11px; border:1px solid #3b4b78; font:inherit; }
     input,textarea { background:#0c1326; color:#fff; padding:12px 13px; }
     textarea { min-height:116px; resize:vertical; }
     button,a.button { display:inline-flex; align-items:center; justify-content:center; gap:7px; background:#4867ff; color:white; padding:12px 16px; border:0; border-radius:11px; text-decoration:none; font-weight:700; cursor:pointer; }
@@ -32,14 +32,17 @@
     .item-actions button { width:auto; padding:8px 12px; }
     .notice { min-height:26px; color:#9fe4bf; }
     .notice.error { color:#ff9aa8; }
+    details { padding:12px 13px; margin:12px 0; background:#10182c; }
+    summary { cursor:pointer; font-weight:700; }
+    .hint { font-size:.9rem; }
     code { overflow-wrap:anywhere; color:#bdd0ff; }
     @media (max-width:620px) { .actions { grid-template-columns:1fr; } .item { grid-template-columns:1fr; } .item-actions button { flex:1; } }
   </style>
 </head>
 <body>
 <main>
-  <h1>YouTube 轉 M3U 測試站</h1>
-  <p>貼上你已取得使用及轉播權利的 YouTube 網址。加入後，途播的 M3U 清單會自動更新。</p>
+  <h1>途播授權串流管理站</h1>
+  <p>加入你已取得使用及轉播權利的 HLS/M3U8 或 YouTube 來源。加入及刪除後，途播清單會自動同步。</p>
 
   <section class="panel">
     <label for="key">播放權杖</label>
@@ -52,7 +55,27 @@
   </section>
 
   <section class="panel">
-    <h2>新增 YouTube 影片</h2>
+    <h2>批次新增 HLS／M3U8</h2>
+    <label for="hls-lines">每行一筆：節目名稱 | M3U8 網址（最多 50 筆）</label>
+    <textarea id="hls-lines" placeholder="節目名稱 | https://授權來源.example/playlist.m3u8"></textarea>
+    <details>
+      <summary>來源要求特殊標頭時才填寫</summary>
+      <label for="hls-ref">Referer</label>
+      <input id="hls-ref" type="url" inputmode="url" placeholder="https://授權來源.example/">
+      <label for="hls-origin">Origin</label>
+      <input id="hls-origin" type="url" inputmode="url" placeholder="https://授權來源.example">
+      <label for="hls-ua">User-Agent</label>
+      <input id="hls-ua" placeholder="由來源提供時才填寫">
+    </details>
+    <p class="hint">系統只接受 HTTPS，並會實際確認內容以 <code>#EXTM3U</code> 開頭；不接受一般劇集網頁網址。</p>
+    <label class="rights"><input id="hls-rights" type="checkbox">我確認擁有這些串流的使用與轉播權利</label>
+    <button id="hls-add">驗證並批次加入</button>
+    <p id="hls-notice" class="notice"></p>
+  </section>
+
+  <section class="panel">
+    <h2>YouTube 測試來源</h2>
+    <p class="hint">Google 主機可能被 YouTube 要求真人驗證，因此這項功能不保證可用。</p>
     <label for="urls">YouTube 網址（一行一個，最多 10 個）</label>
     <textarea id="urls" placeholder="https://www.youtube.com/watch?v=..."></textarea>
     <label class="rights"><input id="rights" type="checkbox">我確認擁有這些影片的使用與轉播權利</label>
@@ -67,7 +90,7 @@
 </main>
 <script>
   const $ = (selector) => document.querySelector(selector);
-  const els = { key:$('#key'), save:$('#save-key'), copy:$('#copy-m3u'), tubo:$('#import-tubo'), urls:$('#urls'), rights:$('#rights'), add:$('#add'), notice:$('#notice'), items:$('#items') };
+  const els = { key:$('#key'), save:$('#save-key'), copy:$('#copy-m3u'), tubo:$('#import-tubo'), hlsLines:$('#hls-lines'), hlsRef:$('#hls-ref'), hlsOrigin:$('#hls-origin'), hlsUa:$('#hls-ua'), hlsRights:$('#hls-rights'), hlsAdd:$('#hls-add'), hlsNotice:$('#hls-notice'), urls:$('#urls'), rights:$('#rights'), add:$('#add'), notice:$('#notice'), items:$('#items') };
   const queryKey = new URLSearchParams(location.search).get('key');
   if (queryKey) { localStorage.setItem('youtube-m3u-key', queryKey); history.replaceState({},'',location.pathname); }
   els.key.value = localStorage.getItem('youtube-m3u-key') || '';
@@ -76,6 +99,7 @@
   const playlist = () => `${location.origin}/live.m3u${auth()}`;
   const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const notify = (message,error=false) => { els.notice.textContent=message; els.notice.classList.toggle('error',error); };
+  const notifyHls = (message,error=false) => { els.hlsNotice.textContent=message; els.hlsNotice.classList.toggle('error',error); };
   function updateLinks() { els.tubo.href = `${location.origin}/import-to-tubo${auth()}`; }
   async function request(path, options={}) {
     const response = await fetch(`${path}${path.includes('?')?'&':'?'}key=${encodeURIComponent(key())}`, {headers:{'content-type':'application/json'}, ...options});
@@ -89,11 +113,33 @@
     try {
       const data = await request('/api/items');
       if (!data.items.length) { els.items.innerHTML='<p>尚未加入影片。</p>'; return; }
-      els.items.innerHTML = data.items.map(item => `<article class="item"><div><div class="title">${escapeHtml(item.title)}</div><div class="meta">${item.is_live?'直播':'一般影片'} · ${item.state==='streaming'?'播放中':'待機'}</div></div><div class="item-actions"><button class="secondary probe" data-id="${escapeHtml(item.id)}">測試</button><button class="danger delete" data-id="${escapeHtml(item.id)}">刪除</button></div></article>`).join('');
+      els.items.innerHTML = data.items.map(item => { const source=item.source_type==='hls'?'HLS／M3U8':'YouTube'; const state=item.source_type==='hls'?'直接代理':(item.state==='streaming'?'播放中':'待機'); return `<article class="item"><div><div class="title">${escapeHtml(item.title)}</div><div class="meta">${source} · ${item.is_live?'直播':'隨選'} · ${state}</div></div><div class="item-actions"><button class="secondary probe" data-id="${escapeHtml(item.id)}">測試</button><button class="danger delete" data-id="${escapeHtml(item.id)}">刪除</button></div></article>`; }).join('');
     } catch (error) { els.items.innerHTML=`<p class="notice error">${escapeHtml(error.message)}</p>`; }
   }
   els.save.addEventListener('click', () => { localStorage.setItem('youtube-m3u-key',key()); notify('權杖已儲存。'); loadItems(); });
   els.copy.addEventListener('click', async () => { if(!key()) return notify('請先輸入播放權杖。',true); await navigator.clipboard.writeText(playlist()); notify('M3U 網址已複製。'); });
+  els.hlsAdd.addEventListener('click', async () => {
+    if (!key()) return notifyHls('請先輸入播放權杖。',true);
+    const lines=els.hlsLines.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    if (!lines.length) return notifyHls('請輸入節目名稱與 M3U8 網址。',true);
+    if (lines.length>50) return notifyHls('一次最多加入 50 筆。',true);
+    const items=[];
+    for (let index=0; index<lines.length; index++) {
+      const split=lines[index].indexOf('|');
+      if (split<1) return notifyHls(`第 ${index+1} 行缺少「|」分隔符號。`,true);
+      const title=lines[index].slice(0,split).trim(), url=lines[index].slice(split+1).trim();
+      if (!title || !url) return notifyHls(`第 ${index+1} 行的名稱或網址空白。`,true);
+      items.push({title,url});
+    }
+    if (!els.hlsRights.checked) return notifyHls('請確認你擁有使用與轉播權利。',true);
+    els.hlsAdd.disabled=true; notifyHls(`正在驗證 ${items.length} 筆 M3U8…`);
+    try {
+      const data=await request('/api/hls-items',{method:'POST',body:JSON.stringify({items,headers:{referer:els.hlsRef.value.trim(),origin:els.hlsOrigin.value.trim(),user_agent:els.hlsUa.value.trim()},rights_confirmed:true})});
+      const passed=data.results.filter(x=>x.ok).length, failed=data.results.filter(x=>!x.ok);
+      notifyHls(failed.length?`成功 ${passed} 筆；失敗 ${failed.length} 筆：${failed.map(x=>`第 ${x.index} 行 ${x.error}`).join('；')}`:`成功加入 ${passed} 筆串流。`,failed.length>0);
+      if (passed) { els.hlsLines.value=''; els.hlsRights.checked=false; await loadItems(); }
+    } catch(error) { notifyHls(error.message,true); } finally { els.hlsAdd.disabled=false; }
+  });
   els.add.addEventListener('click', async () => {
     const urls = els.urls.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
     if (!key()) return notify('請先輸入播放權杖。',true);
@@ -112,7 +158,7 @@
     button.disabled=true;
     try {
       if(button.classList.contains('delete')) { if(!confirm('確定刪除這部影片及暫存分段？')) return; await request(`/api/items/${encodeURIComponent(button.dataset.id)}`,{method:'DELETE'}); notify('已刪除，M3U 也已更新。'); }
-      else { await request(`/api/items/${encodeURIComponent(button.dataset.id)}/probe`,{method:'POST'}); notify('YouTube 解析成功。'); }
+      else { await request(`/api/items/${encodeURIComponent(button.dataset.id)}/probe`,{method:'POST'}); notify('來源驗證成功。'); }
       await loadItems();
     } catch(error) { notify(error.message,true); } finally { button.disabled=false; }
   });

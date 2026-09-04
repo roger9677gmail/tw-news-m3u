@@ -1,6 +1,15 @@
-# YouTube 轉 M3U：Compute Engine 測試站
+# 途播授權串流管理站：Compute Engine
 
-這個服務只供使用者已取得使用及轉播權利的 YouTube 內容使用。它提供手機管理頁、受權杖保護的 M3U、單一並行 HLS 封裝，以及閒置自動停止。
+這個服務只供使用者已取得使用及轉播權利的內容使用。它提供手機管理頁、受權杖保護的 M3U、HLS/M3U8 原樣代理，以及 YouTube 單一並行 HLS 封裝。
+
+## HLS／M3U8 管理
+
+- 每行使用 `節目名稱 | https://來源/playlist.m3u8`，一次最多 50 筆。
+- 加入前會實際確認來源以 `#EXTM3U` 開頭。
+- 支援主清單、子清單、分段、初始化檔、AES-128 key 與 Range 請求的代理。
+- 可選填來源正式提供的 `Referer`、`Origin` 和 `User-Agent`。
+- 不轉碼、不下載完整影片；刪除項目後會同步從輸出的 M3U 移除。
+- 上游與重新導向網址必須是公開 HTTPS 位址，並以簽章綁定已加入項目。
 
 ## VM 規格
 
@@ -20,8 +29,9 @@ DOMAIN=你的固定IP.sslip.io bash install.sh
 
 ## 安全限制
 
-- 只接受 YouTube HTTPS 網址。
+- HLS 只接受公開 HTTPS 網址；拒絕本機、內網、雲端 metadata 位址及任意代理網址。
+- YouTube 只接受 `youtube.com` 或 `youtu.be` HTTPS 網址。
 - 所有管理、M3U、HLS 和影片分段均需要播放權杖。
 - e2-micro 同時只允許一部影片封裝；切台時會停止上一部。
 - 150 秒沒有播放請求就停止 FFmpeg。
-- 不儲存 YouTube Cookie，也不繞過 DRM。
+- 不接受 Cookie／帳密、不擷取一般影音網頁，也不繞過 DRM。

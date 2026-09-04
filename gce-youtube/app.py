@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -18,8 +21,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 LOGGER = logging.getLogger("youtube_m3u")
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +37,18 @@ YOUTUBE_HOSTS = {
 }
 ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 SEGMENT_RE = re.compile(r"^seg-[0-9]{6}\.ts$")
+HLS_URI_RE = re.compile(r'URI="([^"]+)"')
+MAX_HLS_ITEMS_PER_REQUEST = 50
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+SAFE_UPSTREAM_RESPONSE_HEADERS = {
+    "accept-ranges",
+    "cache-control",
+    "content-length",
+    "content-range",
+    "content-type",
+    "etag",
+    "last-modified",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +60,7 @@ class Settings:
     resolver_timeout_seconds: int = 50
     startup_timeout_seconds: int = 35
     idle_timeout_seconds: int = 150
+    hls_timeout_seconds: int = 20
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -66,6 +84,9 @@ class Settings:
             idle_timeout_seconds=max(
                 60, min(int(os.getenv("IDLE_TIMEOUT_SECONDS", "150")), 900)
             ),
+            hls_timeout_seconds=max(
+                5, min(int(os.getenv("HLS_TIMEOUT_SECONDS", "20")), 60)
+            ),
         )
 
 
@@ -83,6 +104,46 @@ def validate_youtube_url(value: str) -> str:
         raise ValueError("只接受 youtube.com 或 youtu.be 的 HTTPS 網址")
     if parsed.username or parsed.password or parsed.port not in {None, 443}:
         raise ValueError("YouTube 網址格式不正確")
+    return value
+
+
+def validate_hls_url(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("M3U8 網址不可空白")
+    parsed = urllib.parse.urlsplit(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or not host:
+        raise ValueError("只接受公開的 HTTPS M3U8 網址")
+    if parsed.username or parsed.password or parsed.port not in {None, 443}:
+        raise ValueError("M3U8 網址格式不正確")
+    return value
+
+
+def validate_optional_header(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    if "\r" in text or "\n" in text:
+        raise ValueError(f"{label} 格式不正確")
+    if len(text) > 500:
+        raise ValueError(f"{label} 過長")
+    return text
+
+
+async def ensure_public_url(value: str) -> str:
+    value = validate_hls_url(value)
+    host = urllib.parse.urlsplit(value).hostname or ""
+    try:
+        records = await asyncio.to_thread(
+            socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror as exc:
+        raise ValueError("來源網域無法解析") from exc
+    if not records:
+        raise ValueError("來源網域無法解析")
+    for record in records:
+        address = ipaddress.ip_address(record[4][0])
+        if not address.is_global:
+            raise ValueError("來源必須是公開網際網路位址")
     return value
 
 
@@ -250,6 +311,232 @@ class YouTubeResolver:
             "headers": safe_headers,
             "is_live": bool(info.get("is_live") or info.get("live_status") == "is_live"),
         }
+
+
+class HlsGatewayProtocol(Protocol):
+    async def start(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def inspect(
+        self, title: str, url: str, headers: dict[str, str]
+    ) -> dict[str, Any]: ...
+
+    async def fetch_manifest(
+        self, item: dict[str, Any], target_url: str
+    ) -> tuple[str, str]: ...
+
+    async def open_asset(
+        self, item: dict[str, Any], target_url: str, byte_range: str
+    ) -> tuple[httpx.Response, str]: ...
+
+
+class HlsGateway:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.client: httpx.AsyncClient | None = None
+
+    async def start(self) -> None:
+        if self.client is None:
+            self.client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.settings.hls_timeout_seconds),
+                follow_redirects=False,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+
+    async def close(self) -> None:
+        if self.client is not None:
+            await self.client.aclose()
+            self.client = None
+
+    def _request_headers(
+        self, saved_headers: dict[str, Any], byte_range: str = ""
+    ) -> dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, video/*, */*",
+            "User-Agent": "tw-news-m3u-authorized-hls/1.0",
+        }
+        for key, value in saved_headers.items():
+            if key.lower() not in {"user-agent", "referer", "origin"}:
+                continue
+            clean = validate_optional_header(value, key)
+            if clean:
+                headers[key] = clean
+        if byte_range:
+            headers["Range"] = byte_range
+        return headers
+
+    async def _open(
+        self,
+        url: str,
+        headers: dict[str, str],
+        *,
+        method: str = "GET",
+    ) -> tuple[httpx.AsyncClient, httpx.Response, str]:
+        if self.client is None:
+            await self.start()
+        assert self.client is not None
+        current = url
+        for _ in range(5):
+            await ensure_public_url(current)
+            request = self.client.build_request(method, current, headers=headers)
+            try:
+                response = await self.client.send(request, stream=True)
+            except httpx.HTTPError as exc:
+                raise RuntimeError("無法連線到 HLS 來源") from exc
+            if response.status_code not in {301, 302, 303, 307, 308}:
+                return self.client, response, current
+            location = response.headers.get("location")
+            await response.aclose()
+            if not location:
+                raise RuntimeError("HLS 來源重新導向不完整")
+            current = urllib.parse.urljoin(current, location)
+        raise RuntimeError("HLS 來源重新導向次數過多")
+
+    async def _manifest(
+        self, url: str, headers: dict[str, str]
+    ) -> tuple[str, str]:
+        _, response, final_url = await self._open(url, headers)
+        try:
+            if response.status_code >= 400:
+                raise RuntimeError(f"HLS 來源回應 HTTP {response.status_code}")
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > MAX_MANIFEST_BYTES:
+                raise RuntimeError("HLS 播放清單過大")
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > MAX_MANIFEST_BYTES:
+                    raise RuntimeError("HLS 播放清單過大")
+                chunks.append(chunk)
+            body = b"".join(chunks).decode("utf-8-sig", errors="replace")
+        finally:
+            await response.aclose()
+        if not body.lstrip().startswith("#EXTM3U"):
+            raise RuntimeError("來源不是有效的 M3U8/HLS 播放清單")
+        return body, final_url
+
+    async def inspect(
+        self, title: str, url: str, headers: dict[str, str]
+    ) -> dict[str, Any]:
+        url = validate_hls_url(url)
+        title = title.replace("\r", " ").replace("\n", " ").strip()[:180]
+        if not title:
+            raise ValueError("節目名稱不可空白")
+        if len(url) > 5000:
+            raise ValueError("M3U8 網址過長")
+        clean_headers: dict[str, str] = {}
+        for key in ("User-Agent", "Referer", "Origin"):
+            value = validate_optional_header(headers.get(key, ""), key)
+            if value:
+                clean_headers[key] = value
+        item_id = "hls-" + hashlib.sha256(url.encode()).hexdigest()[:20]
+        request_headers = self._request_headers(clean_headers)
+        body, final_url = await self._manifest(url, request_headers)
+        live_probe = body
+        if "#EXT-X-STREAM-INF" in body:
+            variant = next(
+                (
+                    line.strip()
+                    for line in body.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                ),
+                "",
+            )
+            if variant:
+                try:
+                    live_probe, _ = await self._manifest(
+                        urllib.parse.urljoin(final_url, variant), request_headers
+                    )
+                except Exception:
+                    LOGGER.info("Unable to inspect HLS child playlist for %s", item_id)
+        return {
+            "id": item_id,
+            "source_type": "hls",
+            "title": title,
+            "url": url,
+            "headers": clean_headers,
+            "is_live": not (
+                "#EXT-X-ENDLIST" in live_probe
+                or "#EXT-X-PLAYLIST-TYPE:VOD" in live_probe.upper()
+            ),
+            "added_at": utcnow(),
+        }
+
+    async def fetch_manifest(
+        self, item: dict[str, Any], target_url: str
+    ) -> tuple[str, str]:
+        saved = item.get("headers") if isinstance(item.get("headers"), dict) else {}
+        return await self._manifest(target_url, self._request_headers(saved))
+
+    async def open_asset(
+        self, item: dict[str, Any], target_url: str, byte_range: str
+    ) -> tuple[httpx.Response, str]:
+        saved = item.get("headers") if isinstance(item.get("headers"), dict) else {}
+        _, response, final_url = await self._open(
+            target_url, self._request_headers(saved, byte_range=byte_range)
+        )
+        return response, final_url
+
+
+def _encode_hls_target(item_id: str, target_url: str, access_key: str) -> tuple[str, str]:
+    validate_hls_url(target_url)
+    encoded = base64.urlsafe_b64encode(target_url.encode()).decode().rstrip("=")
+    signature = hmac.new(
+        access_key.encode(), f"{item_id}\0{target_url}".encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return encoded, signature
+
+
+def _decode_hls_target(
+    item_id: str, encoded: str, signature: str, access_key: str
+) -> str:
+    if not encoded or len(encoded) > 8000 or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        raise ValueError("HLS 代理網址格式不正確")
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        target_url = base64.urlsafe_b64decode(encoded + padding).decode()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("HLS 代理網址格式不正確") from exc
+    expected = hmac.new(
+        access_key.encode(), f"{item_id}\0{target_url}".encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("HLS 代理簽章錯誤")
+    return validate_hls_url(target_url)
+
+
+def _hls_relay_url(
+    settings: Settings, item_id: str, target_url: str, access_key: str
+) -> str:
+    encoded, signature = _encode_hls_target(item_id, target_url, settings.access_key)
+    base = f"{settings.public_base_url}/hls/{item_id}/asset"
+    query = urllib.parse.urlencode({"u": encoded, "sig": signature, "key": access_key})
+    return f"{base}?{query}"
+
+
+def rewrite_hls_manifest(
+    body: str,
+    source_url: str,
+    item_id: str,
+    settings: Settings,
+    access_key: str,
+) -> str:
+    def relay(value: str) -> str:
+        target = urllib.parse.urljoin(source_url, value.strip())
+        return _hls_relay_url(settings, item_id, target, access_key)
+
+    output: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            output.append(relay(stripped))
+            continue
+        if "URI=\"" in line:
+            line = HLS_URI_RE.sub(lambda match: f'URI="{relay(match.group(1))}"', line)
+        output.append(line)
+    return "\n".join(output) + "\n"
 
 
 @dataclass(slots=True)
@@ -468,23 +755,27 @@ def create_app(
     catalog: Catalog | None = None,
     resolver: ResolverProtocol | None = None,
     streams: StreamManagerProtocol | None = None,
+    hls_gateway: HlsGatewayProtocol | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     catalog = catalog or Catalog(settings.data_dir / "catalog.json")
     resolver = resolver or YouTubeResolver(settings)
     streams = streams or StreamManager(settings, resolver)
+    hls_gateway = hls_gateway or HlsGateway(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await streams.start()
+        await hls_gateway.start()
         try:
             yield
         finally:
+            await hls_gateway.close()
             await streams.close()
 
     app = FastAPI(
-        title="YouTube 轉 M3U 測試站",
+        title="途播授權串流管理站",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -502,7 +793,7 @@ def create_app(
     @app.get("/api/config")
     async def api_config() -> dict[str, Any]:
         return {
-            "app_name": "YouTube 轉 M3U 測試站",
+            "app_name": "途播授權串流管理站",
             "public_base_url": settings.public_base_url,
             "max_height": settings.max_height,
         }
@@ -544,6 +835,65 @@ def create_app(
             content={"ok": any(result["ok"] for result in results), "results": results},
         )
 
+    @app.post("/api/hls-items")
+    async def add_hls_items(request: Request) -> JSONResponse:
+        _require_access(request, settings)
+        try:
+            payload = await request.json()
+            if payload.get("rights_confirmed") is not True:
+                raise ValueError("請確認你擁有串流的使用與轉播權利")
+            raw_items = payload.get("items")
+            if not isinstance(raw_items, list) or not raw_items:
+                raise ValueError("請至少輸入一個名稱與 M3U8 網址")
+            if len(raw_items) > MAX_HLS_ITEMS_PER_REQUEST:
+                raise ValueError(f"一次最多加入 {MAX_HLS_ITEMS_PER_REQUEST} 個來源")
+            raw_headers = payload.get("headers") or {}
+            if not isinstance(raw_headers, dict):
+                raise ValueError("來源標頭格式不正確")
+            headers = {
+                "User-Agent": validate_optional_header(
+                    raw_headers.get("user_agent", ""), "User-Agent"
+                ),
+                "Referer": validate_optional_header(
+                    raw_headers.get("referer", ""), "Referer"
+                ),
+                "Origin": validate_optional_header(
+                    raw_headers.get("origin", ""), "Origin"
+                ),
+            }
+            headers = {key: value for key, value in headers.items() if value}
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+
+        results: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(raw_items, start=1):
+            try:
+                if not isinstance(raw_item, dict):
+                    raise ValueError("格式不正確")
+                title = str(raw_item.get("title") or "")
+                url = str(raw_item.get("url") or "")
+                item = await hls_gateway.inspect(title, url, headers)
+                catalog.add(item)
+            except Exception as exc:
+                LOGGER.warning("Unable to add HLS item %s: %s", index, exc)
+                results.append(
+                    {
+                        "index": index,
+                        "title": str(raw_item.get("title") or "")[:180]
+                        if isinstance(raw_item, dict)
+                        else "",
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                )
+            else:
+                results.append({"index": index, "ok": True, "item": item})
+        ok = any(result["ok"] for result in results)
+        return JSONResponse(
+            status_code=200 if ok else 502,
+            content={"ok": ok, "results": results},
+        )
+
     @app.post("/api/items/{item_id}/probe")
     async def probe_item(item_id: str, request: Request) -> JSONResponse:
         _require_access(request, settings)
@@ -551,7 +901,15 @@ def create_app(
         if not item:
             raise HTTPException(status_code=404, detail="找不到影片")
         try:
-            info = await resolver.inspect(str(item["url"]))
+            if item.get("source_type") == "hls":
+                saved_headers = (
+                    item.get("headers") if isinstance(item.get("headers"), dict) else {}
+                )
+                info = await hls_gateway.inspect(
+                    str(item.get("title") or item_id), str(item["url"]), saved_headers
+                )
+            else:
+                info = await resolver.inspect(str(item["url"]))
         except Exception as exc:
             return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
         return JSONResponse({"ok": True, "title": info["title"], "is_live": info["is_live"]})
@@ -567,15 +925,23 @@ def create_app(
     @app.api_route("/live.m3u", methods=["GET", "HEAD"])
     async def live_m3u(request: Request) -> Response:
         key = _require_access(request, settings)
-        lines = ["#EXTM3U", "# YouTube M3U — 僅限已取得使用與轉播權利的內容"]
+        lines = ["#EXTM3U", "# 僅限已取得使用與轉播權利的串流內容"]
         for item in catalog.list():
             title = str(item.get("title") or item["id"]).replace("\n", " ").replace(",", "，")
-            kind = "YouTube 直播" if item.get("is_live") else "YouTube 影片"
-            url = _with_key(
-                f"{settings.public_base_url}/stream/{item['id']}/index.m3u8", key
-            )
+            if item.get("source_type") == "hls":
+                kind = "授權 HLS 直播" if item.get("is_live") else "授權 HLS 隨選"
+                url = _with_key(
+                    f"{settings.public_base_url}/hls/{item['id']}/manifest.m3u8", key
+                )
+                tvg_id = str(item["id"])
+            else:
+                kind = "YouTube 直播" if item.get("is_live") else "YouTube 影片"
+                url = _with_key(
+                    f"{settings.public_base_url}/stream/{item['id']}/index.m3u8", key
+                )
+                tvg_id = f"yt-{item['id']}"
             lines.append(
-                f'#EXTINF:-1 tvg-id="yt-{item["id"]}" group-title="{kind}",{title}'
+                f'#EXTINF:-1 tvg-id="{tvg_id}" group-title="{kind}",{title}'
             )
             lines.append(url)
         body = "\n".join(lines) + "\n"
@@ -590,9 +956,89 @@ def create_app(
         key = _require_access(request, settings)
         playlist = _with_key(f"{settings.public_base_url}/live.m3u", key)
         target = "tubo://import?" + urllib.parse.urlencode(
-            {"url": playlist, "name": "YouTube 測試頻道"}
+            {"url": playlist, "name": "授權串流"}
         )
         return RedirectResponse(target, status_code=302)
+
+    @app.api_route("/hls/{item_id}/manifest.m3u8", methods=["GET", "HEAD"])
+    async def hls_manifest(item_id: str, request: Request) -> Response:
+        key = _require_access(request, settings)
+        item = catalog.get(item_id)
+        if not item or item.get("source_type") != "hls":
+            raise HTTPException(status_code=404, detail="找不到 HLS 串流")
+        try:
+            body, final_url = await hls_gateway.fetch_manifest(item, str(item["url"]))
+            rewritten = rewrite_hls_manifest(
+                body, final_url, item_id, settings, key
+            )
+        except Exception as exc:
+            LOGGER.warning("Unable to relay HLS manifest %s: %s", item_id, exc)
+            raise HTTPException(status_code=502, detail=f"HLS 串流無法讀取：{exc}") from exc
+        return Response(
+            content="" if request.method == "HEAD" else rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.api_route("/hls/{item_id}/asset", methods=["GET", "HEAD"])
+    async def hls_asset(item_id: str, request: Request) -> Response:
+        key = _require_access(request, settings)
+        item = catalog.get(item_id)
+        if not item or item.get("source_type") != "hls":
+            raise HTTPException(status_code=404, detail="找不到 HLS 串流")
+        try:
+            target_url = _decode_hls_target(
+                item_id,
+                request.query_params.get("u", ""),
+                request.query_params.get("sig", ""),
+                settings.access_key,
+            )
+            upstream, final_url = await hls_gateway.open_asset(
+                item, target_url, request.headers.get("range", "")
+            )
+        except Exception as exc:
+            LOGGER.warning("Unable to open HLS asset %s: %s", item_id, exc)
+            raise HTTPException(status_code=502, detail=f"HLS 分段無法讀取：{exc}") from exc
+
+        if upstream.status_code >= 400:
+            status_code = upstream.status_code
+            await upstream.aclose()
+            raise HTTPException(status_code=502, detail=f"HLS 來源回應 HTTP {status_code}")
+
+        content_type = upstream.headers.get("content-type", "").lower()
+        path = urllib.parse.urlsplit(final_url).path.lower()
+        is_manifest = path.endswith((".m3u8", ".m3u")) or "mpegurl" in content_type
+        if is_manifest:
+            await upstream.aclose()
+            try:
+                body, resolved_url = await hls_gateway.fetch_manifest(item, final_url)
+                rewritten = rewrite_hls_manifest(
+                    body, resolved_url, item_id, settings, key
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"HLS 子播放清單無法讀取：{exc}"
+                ) from exc
+            return Response(
+                content="" if request.method == "HEAD" else rewritten,
+                media_type="application/vnd.apple.mpegurl",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        response_headers = {
+            name: value
+            for name, value in upstream.headers.items()
+            if name.lower() in SAFE_UPSTREAM_RESPONSE_HEADERS
+        }
+        if request.method == "HEAD":
+            await upstream.aclose()
+            return Response(status_code=upstream.status_code, headers=response_headers)
+        return StreamingResponse(
+            upstream.aiter_raw(),
+            status_code=upstream.status_code,
+            headers=response_headers,
+            background=BackgroundTask(upstream.aclose),
+        )
 
     @app.api_route("/stream/{item_id}/index.m3u8", methods=["GET", "HEAD"])
     async def stream_manifest(item_id: str, request: Request) -> Response:

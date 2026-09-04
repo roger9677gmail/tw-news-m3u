@@ -1,5 +1,5 @@
 [Unit]
-Description=YouTube to M3U relay
+Description=Tubo authorized HLS and YouTube relay
 After=network-online.target bgutil-provider.service
 Wants=network-online.target bgutil-provider.service
 
