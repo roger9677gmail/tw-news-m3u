@@ -130,7 +130,21 @@ def test_resolver_prefers_official_fourgtv_source(tmp_path: Path, monkeypatch) -
         fourgtv_channel_id="31",
         fourgtv_asset_id="litv-ftv13",
     )
-    resolver = YouTubeResolver(make_settings(tmp_path), (channel,))
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/live/index.m3u8":
+            return httpx.Response(
+                200,
+                content=b"#EXTM3U\n#EXTINF:4,\nsegment.ts\n",
+                request=request,
+            )
+        if request.url.path == "/live/segment.ts":
+            return httpx.Response(206, content=b"\x47" * 188, request=request)
+        return httpx.Response(404, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    resolver = YouTubeResolver(
+        make_settings(tmp_path), (channel,), http_client=async_client
+    )
     calls: list[str] = []
 
     async def fake_fourgtv(selected: Channel) -> ResolvedStream:
@@ -156,11 +170,88 @@ def test_resolver_prefers_official_fourgtv_source(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr("app.resolver.resolve_fourgtv", fake_fourgtv)
     resolver._extract = fail_youtube  # type: ignore[method-assign]
 
-    stream = asyncio.run(resolver.resolve(channel.id))
+    async def scenario() -> ResolvedStream:
+        try:
+            return await resolver.resolve(channel.id)
+        finally:
+            await async_client.aclose()
+
+    stream = asyncio.run(scenario())
 
     assert stream.source == "4GTV 官方行動直播"
     assert calls == [channel.id]
     assert resolver.status_snapshot()[channel.id].state == "online"
+
+
+def test_resolver_skips_unhealthy_fourgtv_and_uses_experimental_hls(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fallback = HLSFallback(
+        name="Working public fallback",
+        url="http://4gtv.cnlive.club/channel/test/index.m3u8",
+        source_page="https://github.com/example/public-list",
+    )
+    channel = Channel(
+        id="stale-official-news",
+        name="Stale Official News",
+        group="News",
+        short_name="Stale",
+        sources=("https://www.youtube.com/@example/live",),
+        fourgtv_channel_id="31",
+        fourgtv_asset_id="litv-ftv13",
+        experimental_hls=(fallback,),
+    )
+
+    async def fake_fourgtv(selected: Channel) -> ResolvedStream:
+        now = datetime.now(tz=UTC)
+        return ResolvedStream(
+            channel_id=selected.id,
+            source="4GTV 官方快取直播",
+            stream_url="https://4gtvfreemobile-cds.cdn.hinet.net/stale/index.m3u8",
+            webpage_url="https://www.4gtv.tv/channel_list.html",
+            title=selected.name,
+            video_id=selected.fourgtv_asset_id or "",
+            protocol="m3u8_native",
+            height=None,
+            headers={"User-Agent": "test"},
+            resolved_at=now,
+            expires_at=None,
+        )
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/stale/index.m3u8":
+            return httpx.Response(400, request=request)
+        if request.url.path == "/channel/test/index.m3u8":
+            return httpx.Response(
+                200,
+                content=b"#EXTM3U\n#EXTINF:4,\n/ts/segment.jpeg\n",
+                request=request,
+            )
+        if request.url.path == "/ts/segment.jpeg":
+            return httpx.Response(206, content=b"\x47" * 188, request=request)
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr("app.resolver.resolve_fourgtv", fake_fourgtv)
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    resolver = YouTubeResolver(
+        make_settings(tmp_path), (channel,), http_client=async_client
+    )
+
+    async def fail_youtube(*args, **kwargs) -> ResolvedStream:
+        raise AssertionError("healthy HLS fallback should avoid YouTube")
+
+    resolver._extract = fail_youtube  # type: ignore[method-assign]
+
+    async def scenario() -> ResolvedStream:
+        try:
+            return await resolver.resolve(channel.id)
+        finally:
+            await async_client.aclose()
+
+    stream = asyncio.run(scenario())
+
+    assert stream.stream_url == fallback.url
+    assert stream.source == "實驗性備援：Working public fallback"
 
 
 def test_resolver_uses_health_checked_experimental_hls_before_youtube(

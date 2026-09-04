@@ -176,10 +176,16 @@ class YouTubeResolver:
             if channel.fourgtv_channel_id and channel.fourgtv_asset_id:
                 try:
                     stream = await resolve_fourgtv(channel)
+                    remaining = deadline - loop.time()
+                    if remaining <= 1:
+                        raise ResolveError("4GTV 解析後已達整體逾時")
+                    await self._health_check_stream(
+                        stream, timeout_seconds=min(10.0, remaining)
+                    )
                 except Exception as exc:
                     errors.append(f"4GTV 官方來源：{_clean_error(str(exc), 280)}")
                 else:
-                    return self._store_success(channel_id, stream, "iOS")
+                    return self._store_success(channel_id, stream, "HLS 健康檢查")
 
             if self.settings.experimental_hls_enabled:
                 for fallback in channel.experimental_hls:
@@ -274,10 +280,10 @@ class YouTubeResolver:
     async def _probe_hls_with_client(
         self,
         client: httpx.AsyncClient,
-        fallback: HLSFallback,
+        url: str,
         headers: dict[str, str],
     ) -> None:
-        current_url = fallback.url
+        current_url = url
         for _ in range(3):
             manifest_url, status, _, body = await self._probe_request(
                 client, current_url, headers, limit=512 * 1024
@@ -318,6 +324,29 @@ class YouTubeResolver:
 
         raise ResolveError("HLS 播放清單層級過深")
 
+    async def _health_check_stream(
+        self,
+        stream: ResolvedStream,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        headers = dict(stream.headers)
+        async with asyncio.timeout(timeout_seconds):
+            if self._http_client is not None:
+                await self._probe_hls_with_client(
+                    self._http_client, stream.stream_url, headers
+                )
+            else:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        timeout_seconds, connect=min(5.0, timeout_seconds)
+                    ),
+                    http2=True,
+                ) as client:
+                    await self._probe_hls_with_client(
+                        client, stream.stream_url, headers
+                    )
+
     async def _resolve_experimental_hls(
         self,
         channel: Channel,
@@ -335,13 +364,15 @@ class YouTubeResolver:
 
         async with asyncio.timeout(timeout_seconds):
             if self._http_client is not None:
-                await self._probe_hls_with_client(self._http_client, fallback, headers)
+                await self._probe_hls_with_client(
+                    self._http_client, fallback.url, headers
+                )
             else:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
                     http2=True,
                 ) as client:
-                    await self._probe_hls_with_client(client, fallback, headers)
+                    await self._probe_hls_with_client(client, fallback.url, headers)
 
         resolved_at = utcnow()
         return ResolvedStream(
