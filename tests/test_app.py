@@ -67,6 +67,19 @@ def test_experimental_masked_segment_is_forwarded_as_mpeg_ts() -> None:
     assert _media_content_type(response) == "video/mp2t"
 
 
+def test_ts_segment_with_incorrect_text_type_is_forwarded_as_mpeg_ts() -> None:
+    import httpx
+
+    request = httpx.Request("GET", "http://38.64.72.148/hls/news/segment.ts")
+    response = httpx.Response(
+        206,
+        headers={"Content-Type": "text/vnd.trolltech.linguist"},
+        request=request,
+    )
+
+    assert _media_content_type(response) == "video/mp2t"
+
+
 def test_dashboard_supports_batch_mp4_selection(tmp_path: Path) -> None:
     app = create_app(settings=settings(tmp_path), channels=channels())
     with TestClient(app) as client:

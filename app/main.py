@@ -204,6 +204,11 @@ def _response_headers(response: httpx.Response, *, manifest: bool) -> dict[str, 
 def _media_content_type(response: httpx.Response) -> str | None:
     content_type = response.headers.get("content-type")
     parsed = urllib.parse.urlparse(str(response.url))
+    # Some IPTV origins let the web server identify `.ts` as a Qt translation
+    # file (`text/vnd.trolltech.linguist`). HLS clients need the actual MPEG-TS
+    # media type regardless of that incorrect upstream header.
+    if parsed.path.lower().endswith((".ts", ".m2ts")):
+        return "video/mp2t"
     # This experimental 4GTV-compatible relay publishes MPEG-TS segments with
     # a .jpeg suffix and text/html header. Correct it before forwarding so HLS
     # players do not reject valid transport-stream bytes as a web page.
