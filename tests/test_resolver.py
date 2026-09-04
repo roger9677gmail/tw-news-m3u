@@ -183,6 +183,58 @@ def test_resolver_prefers_official_fourgtv_source(tmp_path: Path, monkeypatch) -
     assert resolver.status_snapshot()[channel.id].state == "online"
 
 
+def test_resolver_does_not_proxy_probe_client_bound_fourgtv_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    channel = Channel(
+        id="cached-news",
+        name="Cached News",
+        group="News",
+        short_name="Cached",
+        sources=("https://www.youtube.com/@example/live",),
+        fourgtv_channel_id="292",
+        fourgtv_asset_id="4gtv-4gtv152",
+    )
+
+    async def fake_fourgtv(selected: Channel) -> ResolvedStream:
+        now = datetime.now(tz=UTC)
+        return ResolvedStream(
+            channel_id=selected.id,
+            source="4GTV 官方快取直播",
+            stream_url=(
+                "https://4gtvfreemobile-cds.cdn.hinet.net/live/index.m3u8"
+                "?expires=4102444800"
+            ),
+            webpage_url="https://www.4gtv.tv/channel_list.html",
+            title=selected.name,
+            video_id=selected.fourgtv_asset_id or "",
+            protocol="m3u8_native",
+            height=None,
+            headers={"User-Agent": "test"},
+            resolved_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("client-bound cache must not be fetched by the relay")
+
+    monkeypatch.setattr("app.resolver.resolve_fourgtv", fake_fourgtv)
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    resolver = YouTubeResolver(
+        make_settings(tmp_path), (channel,), http_client=async_client
+    )
+
+    async def scenario() -> ResolvedStream:
+        try:
+            return await resolver.resolve(channel.id)
+        finally:
+            await async_client.aclose()
+
+    stream = asyncio.run(scenario())
+    assert stream.source == "4GTV 官方快取直播"
+    assert resolver.status_snapshot()[channel.id].state == "online"
+
+
 def test_resolver_skips_unhealthy_fourgtv_and_uses_experimental_hls(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -206,7 +258,7 @@ def test_resolver_skips_unhealthy_fourgtv_and_uses_experimental_hls(
         now = datetime.now(tz=UTC)
         return ResolvedStream(
             channel_id=selected.id,
-            source="4GTV 官方快取直播",
+            source="4GTV 官方行動直播",
             stream_url="https://4gtvfreemobile-cds.cdn.hinet.net/stale/index.m3u8",
             webpage_url="https://www.4gtv.tv/channel_list.html",
             title=selected.name,
@@ -218,13 +270,21 @@ def test_resolver_skips_unhealthy_fourgtv_and_uses_experimental_hls(
             expires_at=None,
         )
 
+    manifest_requests = 0
+
     def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal manifest_requests
         if request.url.path == "/stale/index.m3u8":
             return httpx.Response(400, request=request)
         if request.url.path == "/channel/test/index.m3u8":
+            manifest_requests += 1
             return httpx.Response(
                 200,
-                content=b"#EXTM3U\n#EXTINF:4,\n/ts/segment.jpeg\n",
+                content=(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+                    f"#EXT-X-MEDIA-SEQUENCE:{manifest_requests}\n"
+                    "#EXTINF:4,\n/ts/segment.jpeg\n"
+                ).encode(),
                 request=request,
             )
         if request.url.path == "/ts/segment.jpeg":
@@ -232,6 +292,7 @@ def test_resolver_skips_unhealthy_fourgtv_and_uses_experimental_hls(
         return httpx.Response(404, request=request)
 
     monkeypatch.setattr("app.resolver.resolve_fourgtv", fake_fourgtv)
+    monkeypatch.setattr("app.resolver.HLS_PROGRESS_MAX_WAIT_SECONDS", 0.0)
     async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
     resolver = YouTubeResolver(
         make_settings(tmp_path), (channel,), http_client=async_client
@@ -256,6 +317,7 @@ def test_resolver_skips_unhealthy_fourgtv_and_uses_experimental_hls(
 
 def test_resolver_uses_health_checked_experimental_hls_before_youtube(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     fallback = HLSFallback(
         name="Public test list",
@@ -271,12 +333,20 @@ def test_resolver_uses_health_checked_experimental_hls_before_youtube(
         experimental_hls=(fallback,),
     )
 
+    manifest_requests = 0
+
     def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal manifest_requests
         if request.url.path == "/channel/test/index.m3u8":
+            manifest_requests += 1
             return httpx.Response(
                 200,
                 headers={"Content-Type": "application/vnd.apple.mpegurl"},
-                content=b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n/ts/segment.jpeg\n",
+                content=(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+                    f"#EXT-X-MEDIA-SEQUENCE:{manifest_requests}\n"
+                    "#EXTINF:4,\n/ts/segment.jpeg\n"
+                ).encode(),
                 request=request,
             )
         if request.url.path == "/ts/segment.jpeg":
@@ -293,6 +363,7 @@ def test_resolver_uses_health_checked_experimental_hls_before_youtube(
     resolver = YouTubeResolver(
         make_settings(tmp_path), (channel,), http_client=async_client
     )
+    monkeypatch.setattr("app.resolver.HLS_PROGRESS_MAX_WAIT_SECONDS", 0.0)
 
     async def fail_youtube(*args, **kwargs) -> ResolvedStream:
         raise AssertionError("healthy HLS fallback should avoid YouTube")
@@ -311,6 +382,56 @@ def test_resolver_uses_health_checked_experimental_hls_before_youtube(
     assert stream.source == "實驗性備援：Public test list"
     assert stream.webpage_url == fallback.source_page
     assert resolver.status_snapshot()[channel.id].source == stream.source
+
+
+def test_experimental_hls_rejects_frozen_live_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fallback = HLSFallback(
+        name="Frozen list",
+        url="http://4gtv.cnlive.club/channel/frozen/index.m3u8",
+        source_page="https://github.com/example/frozen-list",
+    )
+    channel = Channel(
+        id="frozen-news",
+        name="Frozen News",
+        group="News",
+        short_name="Frozen",
+        sources=("https://www.youtube.com/@example/live",),
+        experimental_hls=(fallback,),
+    )
+    manifest = (
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:123\n"
+        b"#EXTINF:4,\n/ts/segment.jpeg\n"
+    )
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/channel/frozen/index.m3u8":
+            return httpx.Response(200, content=manifest, request=request)
+        if request.url.path == "/ts/segment.jpeg":
+            return httpx.Response(206, content=b"\x47" * 188, request=request)
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr("app.resolver.HLS_PROGRESS_MAX_WAIT_SECONDS", 0.0)
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    resolver = YouTubeResolver(
+        make_settings(tmp_path), (channel,), http_client=async_client
+    )
+
+    async def scenario() -> None:
+        try:
+            try:
+                await resolver._resolve_experimental_hls(
+                    channel, fallback, timeout_seconds=5
+                )
+            except Exception as exc:
+                assert "沒有更新" in str(exc)
+            else:
+                raise AssertionError("frozen live manifest must fail health check")
+        finally:
+            await async_client.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_experimental_hls_rejects_empty_manifest(tmp_path: Path) -> None:

@@ -18,6 +18,8 @@ from .models import ResolvedStream, ResolverStatus
 
 LOGGER = logging.getLogger(__name__)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+TARGET_DURATION_RE = re.compile(rb"(?m)^#EXT-X-TARGETDURATION:(\d+(?:\.\d+)?)\s*$")
+HLS_PROGRESS_MAX_WAIT_SECONDS = 5.0
 
 
 class ResolveError(RuntimeError):
@@ -176,16 +178,22 @@ class YouTubeResolver:
             if channel.fourgtv_channel_id and channel.fourgtv_asset_id:
                 try:
                     stream = await resolve_fourgtv(channel)
-                    remaining = deadline - loop.time()
-                    if remaining <= 1:
-                        raise ResolveError("4GTV 解析後已達整體逾時")
-                    await self._health_check_stream(
-                        stream, timeout_seconds=min(10.0, remaining)
-                    )
+                    if stream.source != "4GTV 官方快取直播":
+                        remaining = deadline - loop.time()
+                        if remaining <= 1:
+                            raise ResolveError("4GTV 解析後已達整體逾時")
+                        await self._health_check_stream(
+                            stream, timeout_seconds=min(10.0, remaining)
+                        )
                 except Exception as exc:
                     errors.append(f"4GTV 官方來源：{_clean_error(str(exc), 280)}")
                 else:
-                    return self._store_success(channel_id, stream, "HLS 健康檢查")
+                    profile = (
+                        "iPhone 直連官方 HLS"
+                        if stream.source == "4GTV 官方快取直播"
+                        else "HLS 健康檢查"
+                    )
+                    return self._store_success(channel_id, stream, profile)
 
             if self.settings.experimental_hls_enabled:
                 for fallback in channel.experimental_hls:
@@ -282,6 +290,8 @@ class YouTubeResolver:
         client: httpx.AsyncClient,
         url: str,
         headers: dict[str, str],
+        *,
+        require_live_progress: bool = False,
     ) -> None:
         current_url = url
         for _ in range(3):
@@ -320,6 +330,28 @@ class YouTubeResolver:
             prefix = segment.lstrip()[:32].lower()
             if prefix.startswith((b"<!doctype html", b"<html")):
                 raise ResolveError("第一個影音分段回傳錯誤網頁")
+
+            if require_live_progress and b"#EXT-X-ENDLIST" not in body:
+                match = TARGET_DURATION_RE.search(body)
+                target_duration = float(match.group(1)) if match else 4.0
+                await asyncio.sleep(
+                    min(target_duration + 0.25, HLS_PROGRESS_MAX_WAIT_SECONDS)
+                )
+                progress_headers = {**headers, "Cache-Control": "no-cache"}
+                _, refreshed_status, _, refreshed_body = await self._probe_request(
+                    client,
+                    manifest_url,
+                    progress_headers,
+                    limit=512 * 1024,
+                )
+                if refreshed_status < 200 or refreshed_status >= 300:
+                    raise ResolveError(
+                        f"播放清單重查回應 HTTP {refreshed_status}"
+                    )
+                if not refreshed_body.lstrip().startswith(b"#EXTM3U"):
+                    raise ResolveError("上游重查沒有回傳 HLS 播放清單")
+                if refreshed_body == body:
+                    raise ResolveError("HLS 直播播放清單沒有更新（來源可能已停止）")
             return
 
         raise ResolveError("HLS 播放清單層級過深")
@@ -365,14 +397,22 @@ class YouTubeResolver:
         async with asyncio.timeout(timeout_seconds):
             if self._http_client is not None:
                 await self._probe_hls_with_client(
-                    self._http_client, fallback.url, headers
+                    self._http_client,
+                    fallback.url,
+                    headers,
+                    require_live_progress=True,
                 )
             else:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
                     http2=True,
                 ) as client:
-                    await self._probe_hls_with_client(client, fallback.url, headers)
+                    await self._probe_hls_with_client(
+                        client,
+                        fallback.url,
+                        headers,
+                        require_live_progress=True,
+                    )
 
         resolved_at = utcnow()
         return ResolvedStream(

@@ -142,7 +142,10 @@ def cache_from_client_responses(
             raise FourGTVError("更新內容含有未知頻道")
         if channel_id in result:
             raise FourGTVError(f"頻道 {channel_id} 重複")
-        url = _stream_urls(response_payload)[-1]
+        # Prefer the first official CDN returned by 4GTV. The API currently
+        # lists Hinet first and Mozai second; Mozai can return HTTP 403 even
+        # while the Hinet URL from the same response remains playable.
+        url = _stream_urls(response_payload)[0]
         validate_upstream_url(url)
         expiry = stream_expiry(url)
         if expiry is None or expiry <= datetime.now(tz=UTC):
@@ -209,9 +212,10 @@ def _fetch_stream_url(channel: Channel, timeout_seconds: float) -> str:
         payload = response.json()
     except Exception as exc:
         raise FourGTVError(f"官方 API 連線失敗：{exc}") from exc
-    # The first URL normally points at Hinet, which rejects some data-center
-    # networks. 4GTV's own Mozai CDN is the more portable relay source.
-    return _stream_urls(payload)[-1]
+    # Prefer the first official CDN returned by 4GTV. In current responses the
+    # first Hinet URL remains playable while the later Mozai URL can return
+    # HTTP 403.
+    return _stream_urls(payload)[0]
 
 
 async def resolve_fourgtv(channel: Channel, timeout_seconds: float = 15.0) -> ResolvedStream:

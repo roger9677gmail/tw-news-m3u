@@ -137,6 +137,60 @@ def test_key_is_optional_when_not_configured(tmp_path: Path) -> None:
         assert "?key=" not in response.text
 
 
+def test_client_bound_fourgtv_cache_redirects_player_to_official_cdn(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import ResolvedStream, ResolverStatus
+
+    channel_set = channels()
+    upstream_url = (
+        "https://4gtvfreemobile-cds.cdn.hinet.net/live/index.m3u8"
+        "?token=official&expires=4102444800"
+    )
+
+    class CachedResolver:
+        def channel(self, channel_id: str) -> Channel:
+            if channel_id != "test-news":
+                raise KeyError(channel_id)
+            return channel_set[0]
+
+        async def resolve(self, channel_id: str, *, force: bool = False) -> ResolvedStream:
+            now = datetime.now(tz=UTC)
+            return ResolvedStream(
+                channel_id=channel_id,
+                source="4GTV 官方快取直播",
+                stream_url=upstream_url,
+                webpage_url="https://www.4gtv.tv/channel_list.html",
+                title="測試直播",
+                video_id="4gtv-test",
+                protocol="m3u8_native",
+                height=None,
+                headers={"User-Agent": "test"},
+                resolved_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+
+        def status_snapshot(self) -> dict[str, ResolverStatus]:
+            return {"test-news": ResolverStatus(state="online")}
+
+    app = create_app(
+        settings=settings(tmp_path),
+        channels=channel_set,
+        resolver=CachedResolver(),  # type: ignore[arg-type]
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/hls/test-news/master.m3u8?key=test-secret",
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == upstream_url
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+
+
 def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
     import asyncio
     import gzip

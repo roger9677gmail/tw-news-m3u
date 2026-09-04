@@ -109,5 +109,5 @@ def test_refresh_plan_and_client_response_cache() -> None:
     )
 
     assert cache["channels"][channel.id]["url"].startswith(
-        "https://4gtvfreemobile-mozai.4gtv.tv/"
+        "https://4gtvfreemobile-cds.cdn.hinet.net/"
     )

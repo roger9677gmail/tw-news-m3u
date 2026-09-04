@@ -670,6 +670,17 @@ def create_app(
                 detail=f"{channel_id} 目前無法解析：{exc}",
             ) from exc
 
+        # 4GTV's short-lived cached URLs are authorized for the network that
+        # requested them (normally the user's iPhone). Cloud Run therefore
+        # redirects the player to the official CDN instead of fetching the
+        # stream from a different data-center IP, which would receive 403.
+        if stream.source == "4GTV 官方快取直播":
+            return RedirectResponse(
+                validate_upstream_url(stream.stream_url),
+                status_code=302,
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
+
         first_error: HTTPException | None = None
         try:
             response = await _proxy_response(
