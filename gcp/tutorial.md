@@ -69,4 +69,4 @@ cat ~/tw-news-m3u-project-id.txt
 
 <walkthrough-conclusion-trophy></walkthrough-conclusion-trophy>
 
-部署完成。請先用瀏覽器打開 Cloud Run 網站並測試一個頻道；預設 8 台會使用官方行動直播來源，不需要家中 NAS 或電腦常駐。
+部署完成。請先用瀏覽器打開 Cloud Run 網站並測試一個頻道；預設 7 台會自動選擇通過健康檢查的直播來源，不需要家中 NAS 或電腦常駐。

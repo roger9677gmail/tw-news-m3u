@@ -155,19 +155,5 @@
       "https://www.youtube.com/@57ETFN/live",
       "https://www.youtube.com/channel/UCuzqko_GKcj9922M1gUo__w/live"
     ]
-  },
-  {
-    "id": "mnews",
-    "name": "鏡新聞",
-    "group": "綜合新聞",
-    "short_name": "鏡新聞",
-    "fourgtv": {
-      "channel_id": "268",
-      "asset_id": "4gtv-4gtv075"
-    },
-    "sources": [
-      "https://www.youtube.com/@mnews-tw/live",
-      "https://www.youtube.com/watch?v=5n0y6b0Q25o"
-    ]
   }
 ]

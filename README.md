@@ -31,7 +31,6 @@ Cloud Run 在第一次點台時取得當下的官方直播，之後短暫快取�
 - 中視新聞
 - 寰宇新聞
 - 東森財經新聞
-- 鏡新聞
 
 來源集中在 [`channels.json`](channels.json)。其中 `experimental_hls` 來自公開 GitHub IPTV 清單，不代表內容提供者的官方背書；管理頁會明確標示目前是否正在使用實驗性備援。
 

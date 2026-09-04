@@ -5,7 +5,7 @@
 1. `deploy-cloud-run.sh`：在 Google Cloud Shell 直接完成第一次部署。
 2. `setup-github-actions.sh`：建立 Workload Identity Federation，之後由 GitHub Actions 自動更新 Cloud Run，不保存長效 JSON 金鑰。
 
-> 目前預設的 8 個頻道使用 4GTV 官方行動直播來源，已避開 YouTube 對 Google 雲端 IP 的機器人驗證。自行新增的 YouTube 頻道仍可能受此限制。
+> 目前預設 7 個頻道；系統優先使用 4GTV，失效時改用通過健康檢查的公開 HLS 備援。自行新增的 YouTube 頻道仍可能受到 Google 雲端 IP 的機器人驗證限制。
 
 4GTV 會限制雲端主機直接更新短期網址。若沒有 NAS 或電腦，請依 [iPhone 更新工具](https://roger9677gmail.github.io/tw-news-m3u/iphone-refresh.html) 設定 Scriptable；需要看新聞時先執行一次，iPhone 不必常駐。
 
@@ -60,7 +60,7 @@ https://tw-news-m3u-xxxxxxxxxx-de.a.run.app
 https://tw-news-m3u-xxxxxxxxxx-de.a.run.app/live.m3u?key=你的播放權杖
 ```
 
-先用瀏覽器打開網站，輸入播放權杖並測試頻道，再將完整 M3U 網址貼進途播。預設 8 台應在數秒內完成測試。
+先用瀏覽器打開網站，輸入播放權杖並測試頻道，再將完整 M3U 網址貼進途播。預設 7 台應在數秒內完成測試。
 
 ## 啟用 GitHub Actions 自動部署
 
@@ -120,7 +120,7 @@ request timeout: 3600 seconds
 
 即使部署位於台灣區域，Google Cloud 的出口仍屬資料中心網路。YouTube 可能要求 Cookie、登入或機器人驗證。請勿將個人 YouTube Cookie 直接提交到公開 GitHub repo。
 
-預設 8 台不依賴 YouTube 解析。只有自行加入、且沒有 `fourgtv` 官方來源設定的頻道，才會走 YouTube 備援並可能遇到機器人驗證。
+預設 7 台不依賴 YouTube 解析。只有自行加入、且沒有 `fourgtv` 或 HLS 備援設定的頻道，才會走 YouTube 備援並可能遇到機器人驗證。
 
 ## 常用指令
 
