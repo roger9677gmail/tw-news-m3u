@@ -152,6 +152,7 @@ def _status_payload(channels: tuple[Channel, ...], resolver: YouTubeResolver) ->
                 "state": status.state,
                 "title": status.title,
                 "height": status.height,
+                "source": status.source,
                 "webpage_url": status.webpage_url or channel.sources[0],
                 "resolved_at": iso_datetime(status.resolved_at),
                 "expires_at": iso_datetime(status.expires_at),
@@ -198,6 +199,20 @@ def _response_headers(response: httpx.Response, *, manifest: bool) -> dict[str, 
     else:
         headers["Cache-Control"] = "private, max-age=20"
     return headers
+
+
+def _media_content_type(response: httpx.Response) -> str | None:
+    content_type = response.headers.get("content-type")
+    parsed = urllib.parse.urlparse(str(response.url))
+    # This experimental 4GTV-compatible relay publishes MPEG-TS segments with
+    # a .jpeg suffix and text/html header. Correct it before forwarding so HLS
+    # players do not reject valid transport-stream bytes as a web page.
+    if (
+        parsed.hostname == "4gtv.cnlive.club"
+        and parsed.path.lower().endswith(".jpeg")
+    ):
+        return "video/mp2t"
+    return content_type
 
 
 async def _close_upstream(response: httpx.Response) -> None:
@@ -329,7 +344,10 @@ async def _proxy_response(
             headers=_response_headers(upstream, manifest=True),
         )
 
+    content_type = _media_content_type(upstream)
     response_headers = _response_headers(upstream, manifest=False)
+    if content_type:
+        response_headers["content-type"] = content_type
     if request.method == "HEAD":
         await upstream.aclose()
         return Response(status_code=upstream.status_code, headers=response_headers)
@@ -351,7 +369,9 @@ def create_app(
 ) -> FastAPI:
     settings = settings or load_settings()
     channels = channels or load_channels(settings.channels_path)
-    resolver = resolver or YouTubeResolver(settings, channels)
+    resolver = resolver or YouTubeResolver(
+        settings, channels, http_client=http_client
+    )
     owns_client = http_client is None
     karaoke_backend: KaraokeStore
     if karaoke_store is not None:
@@ -384,9 +404,13 @@ def create_app(
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=30),
             http2=True,
         )
+        if isinstance(resolver, YouTubeResolver):
+            resolver.set_http_client(app.state.http_client)
         yield
         if owns_client:
             await app.state.http_client.aclose()
+            if isinstance(resolver, YouTubeResolver):
+                resolver.set_http_client(None)
 
     app = FastAPI(
         title=settings.app_name,
@@ -460,6 +484,7 @@ def create_app(
                 "channel_id": channel_id,
                 "title": stream.title,
                 "height": stream.height,
+                "source": stream.source,
                 "resolved_at": iso_datetime(stream.resolved_at),
                 "expires_at": iso_datetime(stream.expires_at),
             }
@@ -603,22 +628,35 @@ def create_app(
                 detail=f"{channel_id} 目前無法解析：{exc}",
             ) from exc
 
-        response = await _proxy_response(
-            app=app,
-            request=request,
-            channel_id=channel_id,
-            url=stream.stream_url,
-            headers=stream.headers,
-            access_key=key,
-        )
-        if response.status_code not in {403, 404, 410}:
-            return response
+        first_error: HTTPException | None = None
+        try:
+            response = await _proxy_response(
+                app=app,
+                request=request,
+                channel_id=channel_id,
+                url=stream.stream_url,
+                headers=stream.headers,
+                access_key=key,
+            )
+        except HTTPException as exc:
+            if exc.status_code != 502:
+                raise
+            first_error = exc
+            response = None
+        else:
+            if response.status_code < 400:
+                return response
 
-        # A cached upstream URL may have expired between manifest reloads.
+        # Cached official URLs and experimental fallbacks can disappear at any
+        # time. Re-resolve on every upstream error, including DNS/connection
+        # failures and 5xx responses, instead of leaving the player spinning.
         resolver.invalidate(channel_id)
         try:
             fresh = await resolver.resolve(channel_id, force=True)
         except ResolveError:
+            if response is None and first_error is not None:
+                raise first_error
+            assert response is not None
             return response
         return await _proxy_response(
             app=app,

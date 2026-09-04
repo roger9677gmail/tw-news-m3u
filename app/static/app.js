@@ -97,9 +97,10 @@ function formatBytes(value) {
 
 function stateLabel(channel) {
   if (channel.state === 'online') {
-    return `${channel.height ? `${channel.height}p · ` : ''}${formatDate(channel.resolved_at)} 已解析`;
+    const fallback = String(channel.source || '').startsWith('實驗性備援：') ? ' · 實驗性備援' : '';
+    return `${channel.height ? `${channel.height}p · ` : ''}${formatDate(channel.resolved_at)} 已解析${fallback}`;
   }
-  if (channel.state === 'resolving') return '正在解析官方直播…';
+  if (channel.state === 'resolving') return '正在檢查可用直播…';
   if (channel.state === 'error') return `失敗 · ${channel.error || '來源暫時不可用'}`;
   return '尚未測試；途播點播時會自動解析';
 }
@@ -110,7 +111,7 @@ function channelCard(channel) {
       <span class="dot" aria-hidden="true"></span>
       <div>
         <h3>${escapeHtml(channel.name)}</h3>
-        <p title="${escapeHtml(channel.error || '')}">${escapeHtml(stateLabel(channel))}</p>
+        <p title="${escapeHtml(channel.error || channel.source || '')}">${escapeHtml(stateLabel(channel))}</p>
       </div>
       <button type="button" class="probe quiet">測試</button>
     </article>`;
@@ -377,12 +378,13 @@ async function probe(button) {
   button.textContent = '解析中';
   card.className = 'channel-card resolving';
   const text = card.querySelector('p');
-  text.textContent = '正在連線官方直播，請稍候…';
+  text.textContent = '正在檢查官方與備援直播，請稍候…';
   try {
     const result = await requestJson(`/api/channels/${encodeURIComponent(channelId)}/probe${authQuery()}`, {
       method: 'POST',
     });
-    showToast(`${card.querySelector('h3').textContent}：解析成功${result.height ? ` ${result.height}p` : ''}`);
+    const fallback = String(result.source || '').startsWith('實驗性備援：') ? '（實驗性備援）' : '';
+    showToast(`${card.querySelector('h3').textContent}：解析成功${fallback}${result.height ? ` ${result.height}p` : ''}`);
   } catch (error) {
     showToast(`解析失敗：${error.message}`);
   } finally {

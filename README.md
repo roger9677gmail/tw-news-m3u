@@ -1,6 +1,6 @@
 # 台灣新聞直播 M3U Relay
 
-將台灣新聞台的**官方公開直播**，即時轉成途播與其他 HLS/M3U 播放器可使用的固定清單。Cloud Run 版本優先使用 4GTV 官方行動直播來源，避免公有雲出口被 YouTube 機器人驗證攔截。
+將台灣新聞台的公開直播，即時轉成途播與其他 HLS/M3U 播放器可使用的固定清單。Cloud Run 版本優先使用 4GTV 官方行動直播來源；官方來源失效時，可選擇啟用播放前會先健康檢查的第三方實驗性 HLS 備援。
 
 專案入口：<https://roger9677gmail.github.io/tw-news-m3u/>（GitHub Pages 僅提供靜態說明；直播 Relay 仍需依下方步驟部署。）
 
@@ -33,7 +33,7 @@ Cloud Run 在第一次點台時取得當下的官方直播，之後短暫快取�
 - 東森財經新聞
 - 鏡新聞
 
-目前清單只保留已實際驗證可從 Cloud Run 播放的 8 台。來源集中在 [`channels.json`](channels.json)。
+來源集中在 [`channels.json`](channels.json)。其中 `experimental_hls` 來自公開 GitHub IPTV 清單，不代表內容提供者的官方背書；管理頁會明確標示目前是否正在使用實驗性備援。
 
 4GTV 的短期直播網址會過期，而 4GTV 會拒絕 Cloud Run 與 GitHub 美國執行器直接更新。沒有 NAS／電腦的使用者可用 iPhone 上的 Scriptable 更新：<https://roger9677gmail.github.io/tw-news-m3u/iphone-refresh.html>。iPhone 只在按下更新時取得官方網址，不需要常駐或代為轉送影片。
 
@@ -193,6 +193,7 @@ docker compose up -d
 | `MAX_RESOLVER_CONCURRENCY` | `2` | 同時執行的 yt-dlp 解析數，避免 NAS 瞬間過載 |
 | `MEDIA_TOKEN_TTL_SECONDS` | `21600` | 內部媒體權杖有效時間 |
 | `UPSTREAM_TIMEOUT_SECONDS` | `25` | 上游連線逾時 |
+| `EXPERIMENTAL_HLS_ENABLED` | `true` | 官方來源失效時允許使用已列明來源頁、且通過播放清單與影音分段檢查的實驗性 HLS |
 | `LOG_LEVEL` | `INFO` | 日誌層級 |
 | `GCP_PROJECT_ID` | 空白 | KTV 儲存所屬的 Google Cloud Project |
 | `KARAOKE_BUCKET` | 空白 | 私人 Cloud Storage bucket；空白時關閉 KTV 功能 |
@@ -202,11 +203,11 @@ docker compose up -d
 
 1. 途播讀取 `/live.m3u`。
 2. 點選頻道後，途播要求 `/hls/<頻道>/master.m3u8`。
-3. Relay 優先透過 4GTV 官方行動 API 取得直播；自訂 YouTube 頻道才使用 yt-dlp 備援。
+3. Relay 優先透過 4GTV 官方行動 API 取得直播；失敗後檢查設定的實驗性 HLS，最後才嘗試容易被公有雲攔截的 YouTube。
 4. Relay 下載 HLS manifest，將裡面的播放清單、分段與金鑰網址改寫成短期內部權杖。
 5. 途播後續所有影音請求都由 Relay 代為取回。
 
-伺服器只允許 4GTV、中華電信 CDN 與 YouTube/GoogleVideo 相關媒體主機，不提供任意網址代理，避免被濫用成 open proxy。
+伺服器只允許設定中明列的 4GTV、中華電信 CDN、YouTube/GoogleVideo 與兩個實驗性媒體主機，不提供任意網址代理，避免被濫用成 open proxy。
 
 ## 新增或修改頻道
 
@@ -221,6 +222,13 @@ docker compose up -d
   "sources": [
     "https://www.youtube.com/@官方頻道/live",
     "https://www.youtube.com/live/固定直播ID"
+  ],
+  "experimental_hls": [
+    {
+      "name": "公開清單名稱",
+      "url": "https://允許的媒體主機/live.m3u8",
+      "source_page": "https://github.com/來源專案/清單"
+    }
   ]
 }
 ```
@@ -229,7 +237,7 @@ docker compose up -d
 
 - `id` 只能使用小寫英數字與連字號。
 - 把最穩定的官方 `/live` 或固定直播網址放前面。
-- 本版本的安全白名單只允許 YouTube/GoogleVideo 媒體來源。
+- 實驗性來源必須同時填寫其公開來源頁，而且媒體主機必須在程式的安全白名單內。
 - 修改後執行 `docker compose up -d --build`。
 
 ## 疑難排解
@@ -279,7 +287,7 @@ docker compose up -d --build
 
 ## 安全與使用範圍
 
-- 僅加入內容提供者公開發布的直播來源。
+- 官方來源失效時可使用公開 GitHub 清單中的第三方實驗性來源；公開可見不代表已取得官方背書或再散布授權，可用 `EXPERIMENTAL_HLS_ENABLED=false` 完全停用。
 - 不處理付費、私人、DRM 或需要竊取憑證的內容。
 - 新聞串流不保存或錄製；只有使用者主動上傳的 KTV MP4 會轉碼並保存在私人 Cloud Storage。
 - `ACCESS_KEY` 會出現在 M3U 網址中，因此它只能是本服務專用權杖，不可重複使用 NAS、Google 或其他帳號密碼。Uvicorn access log 已預設關閉；外部連線仍應使用 HTTPS。

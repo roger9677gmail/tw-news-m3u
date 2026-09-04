@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Channel, Settings
 from app.karaoke import KaraokeSong
-from app.main import create_app
+from app.main import _media_content_type, create_app
 
 
 def settings(tmp_path: Path, *, key: str = "test-secret") -> Settings:
@@ -50,6 +50,21 @@ def test_health_and_config_do_not_require_key(tmp_path: Path) -> None:
         assert config.status_code == 200
         assert config.json()["access_required"] is True
         assert config.json()["public_base_url"] == "https://relay.example"
+
+
+def test_experimental_masked_segment_is_forwarded_as_mpeg_ts() -> None:
+    import httpx
+
+    request = httpx.Request(
+        "GET", "http://4gtv.cnlive.club/ts/channel.123.jpeg"
+    )
+    response = httpx.Response(
+        206,
+        headers={"Content-Type": "text/html; charset=UTF-8"},
+        request=request,
+    )
+
+    assert _media_content_type(response) == "video/mp2t"
 
 
 def test_dashboard_supports_batch_mp4_selection(tmp_path: Path) -> None:
@@ -205,6 +220,81 @@ def test_full_manifest_and_segment_relay(tmp_path: Path) -> None:
         assert segment.content == segment_bytes
         assert segment.headers["content-type"].startswith("video/mp2t")
 
+    asyncio.run(async_client.aclose())
+
+
+def test_master_reselects_source_after_any_upstream_error(tmp_path: Path) -> None:
+    import asyncio
+    from datetime import UTC, datetime
+
+    import httpx
+
+    from app.models import ResolvedStream, ResolverStatus
+
+    channel_set = channels()
+
+    class FailoverResolver:
+        def __init__(self) -> None:
+            self.invalidated = False
+            self.calls: list[bool] = []
+
+        def channel(self, channel_id: str) -> Channel:
+            if channel_id != "test-news":
+                raise KeyError(channel_id)
+            return channel_set[0]
+
+        async def resolve(self, channel_id: str, *, force: bool = False) -> ResolvedStream:
+            self.calls.append(force)
+            now = datetime.now(tz=UTC)
+            path = "working.m3u8" if force else "failed.m3u8"
+            return ResolvedStream(
+                channel_id=channel_id,
+                source="test",
+                stream_url=f"https://manifest.googlevideo.com/{path}",
+                webpage_url="https://www.youtube.com/@example/live",
+                title="Test",
+                video_id="test",
+                protocol="m3u8_native",
+                height=720,
+                headers={"User-Agent": "test"},
+                resolved_at=now,
+                expires_at=None,
+            )
+
+        def invalidate(self, channel_id: str) -> None:
+            self.invalidated = True
+
+        def status_snapshot(self) -> dict[str, ResolverStatus]:
+            return {"test-news": ResolverStatus()}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/failed.m3u8":
+            return httpx.Response(502, content=b"temporary failure", request=request)
+        if request.url.path == "/working.m3u8":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/vnd.apple.mpegurl"},
+                content=b"#EXTM3U\n#EXTINF:4,\nsegment.ts\n",
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    resolver = FailoverResolver()
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app = create_app(
+        settings=settings(tmp_path),
+        channels=channel_set,
+        resolver=resolver,  # type: ignore[arg-type]
+        http_client=async_client,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/hls/test-news/master.m3u8?key=test-secret")
+
+    assert response.status_code == 200
+    assert response.text.startswith("#EXTM3U")
+    assert resolver.invalidated is True
+    assert resolver.calls == [False, True]
     asyncio.run(async_client.aclose())
 
 

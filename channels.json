@@ -8,6 +8,13 @@
       "channel_id": "473",
       "asset_id": "media-live072"
     },
+    "experimental_hls": [
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/n1ea96b20/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@tvbsnews01/live",
       "https://www.youtube.com/live/m_dhMSvUCIc"
@@ -22,6 +29,13 @@
       "channel_id": "229",
       "asset_id": "4gtv-live089"
     },
+    "experimental_hls": [
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/4fa717ad/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@setnews-ch54/live",
       "https://www.youtube.com/channel/UC2TuODJhC03pLgd6MpWP0iw/live",
@@ -37,6 +51,13 @@
       "channel_id": "292",
       "asset_id": "4gtv-4gtv152"
     },
+    "experimental_hls": [
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/n5ca63a3a/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@newsebc/live",
       "https://www.youtube.com/user/newsebc/live",
@@ -52,6 +73,18 @@
       "channel_id": "31",
       "asset_id": "litv-ftv13"
     },
+    "experimental_hls": [
+      {
+        "name": "GitHub 公開 IP 清單",
+        "url": "http://38.64.72.148/hls/modn/list/4012/chunklist0.m3u8",
+        "source_page": "https://github.com/c120487/00/blob/main/1028live.txt"
+      },
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/nca14742/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@FTV_News/live",
       "https://www.youtube.com/live/ylYJSBUgaMA",
@@ -67,6 +100,13 @@
       "channel_id": "33",
       "asset_id": "4gtv-4gtv074"
     },
+    "experimental_hls": [
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/7e6461d6/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@twctvnews/live",
       "https://www.youtube.com/@chinatvnews/live",
@@ -82,6 +122,13 @@
       "channel_id": "36",
       "asset_id": "litv-longturn14"
     },
+    "experimental_hls": [
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/n4da4274/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@globalnewstw/live",
       "https://www.youtube.com/channel/UCp2f7tGJGN6R9Muxipem8Nw/live",
@@ -97,6 +144,13 @@
       "channel_id": "293",
       "asset_id": "4gtv-4gtv153"
     },
+    "experimental_hls": [
+      {
+        "name": "YueChan GitHub 公開清單",
+        "url": "http://4gtv.cnlive.club/channel/57ce2e74/index.m3u8",
+        "source_page": "https://github.com/YueChan/Live/blob/main/GNTV.m3u"
+      }
+    ],
     "sources": [
       "https://www.youtube.com/@57ETFN/live",
       "https://www.youtube.com/channel/UCuzqko_GKcj9922M1gUo__w/live"

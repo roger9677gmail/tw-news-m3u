@@ -4,7 +4,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.config import Channel, Settings
+import httpx
+
+from app.config import Channel, HLSFallback, Settings
 from app.models import ResolvedStream
 from app.resolver import YouTubeResolver, _clean_error, _last_json_object, _selected_stream
 
@@ -159,3 +161,101 @@ def test_resolver_prefers_official_fourgtv_source(tmp_path: Path, monkeypatch) -
     assert stream.source == "4GTV 官方行動直播"
     assert calls == [channel.id]
     assert resolver.status_snapshot()[channel.id].state == "online"
+
+
+def test_resolver_uses_health_checked_experimental_hls_before_youtube(
+    tmp_path: Path,
+) -> None:
+    fallback = HLSFallback(
+        name="Public test list",
+        url="http://4gtv.cnlive.club/channel/test/index.m3u8",
+        source_page="https://github.com/example/public-list",
+    )
+    channel = Channel(
+        id="fallback-news",
+        name="Fallback News",
+        group="News",
+        short_name="Fallback",
+        sources=("https://www.youtube.com/@example/live",),
+        experimental_hls=(fallback,),
+    )
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/channel/test/index.m3u8":
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/vnd.apple.mpegurl"},
+                content=b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n/ts/segment.jpeg\n",
+                request=request,
+            )
+        if request.url.path == "/ts/segment.jpeg":
+            assert request.headers.get("range") == "bytes=0-2047"
+            return httpx.Response(
+                206,
+                headers={"Content-Type": "text/html"},
+                content=b"\x47" + (b"\x00" * 187),
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    resolver = YouTubeResolver(
+        make_settings(tmp_path), (channel,), http_client=async_client
+    )
+
+    async def fail_youtube(*args, **kwargs) -> ResolvedStream:
+        raise AssertionError("healthy HLS fallback should avoid YouTube")
+
+    resolver._extract = fail_youtube  # type: ignore[method-assign]
+
+    async def scenario() -> ResolvedStream:
+        try:
+            return await resolver.resolve(channel.id)
+        finally:
+            await async_client.aclose()
+
+    stream = asyncio.run(scenario())
+
+    assert stream.stream_url == fallback.url
+    assert stream.source == "實驗性備援：Public test list"
+    assert stream.webpage_url == fallback.source_page
+    assert resolver.status_snapshot()[channel.id].source == stream.source
+
+
+def test_experimental_hls_rejects_empty_manifest(tmp_path: Path) -> None:
+    fallback = HLSFallback(
+        name="Empty list",
+        url="http://4gtv.cnlive.club/channel/empty/index.m3u8",
+        source_page="https://github.com/example/empty-list",
+    )
+    channel = Channel(
+        id="empty-news",
+        name="Empty News",
+        group="News",
+        short_name="Empty",
+        sources=("https://www.youtube.com/@example/live",),
+        experimental_hls=(fallback,),
+    )
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"#EXTM3U\n", request=request)
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    resolver = YouTubeResolver(
+        make_settings(tmp_path), (channel,), http_client=async_client
+    )
+
+    async def scenario() -> None:
+        try:
+            try:
+                await resolver._resolve_experimental_hls(
+                    channel, fallback, timeout_seconds=5
+                )
+            except Exception as exc:
+                assert "沒有影音網址" in str(exc)
+            else:
+                raise AssertionError("empty manifest must fail health check")
+        finally:
+            await async_client.aclose()
+
+    asyncio.run(scenario())

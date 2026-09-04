@@ -9,8 +9,11 @@ import urllib.parse
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .config import Channel, Settings
+import httpx
+
+from .config import Channel, HLSFallback, Settings
 from .fourgtv import resolve_fourgtv
+from .hls import validate_upstream_url
 from .models import ResolvedStream, ResolverStatus
 
 LOGGER = logging.getLogger(__name__)
@@ -96,9 +99,16 @@ def _selected_stream(info: dict[str, Any]) -> tuple[str | None, str, int | None]
 
 
 class YouTubeResolver:
-    def __init__(self, settings: Settings, channels: tuple[Channel, ...]) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        channels: tuple[Channel, ...],
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
         self.settings = settings
         self.channels = {channel.id: channel for channel in channels}
+        self._http_client = http_client
         self._cache: dict[str, ResolvedStream] = {}
         self._status: dict[str, ResolverStatus] = {
             channel.id: ResolverStatus() for channel in channels
@@ -113,6 +123,9 @@ class YouTubeResolver:
             return self.channels[channel_id]
         except KeyError as exc:
             raise KeyError(f"找不到頻道：{channel_id}") from exc
+
+    def set_http_client(self, client: httpx.AsyncClient | None) -> None:
+        self._http_client = client
 
     def invalidate(self, channel_id: str) -> None:
         self._cache.pop(channel_id, None)
@@ -168,6 +181,25 @@ class YouTubeResolver:
                 else:
                     return self._store_success(channel_id, stream, "iOS")
 
+            if self.settings.experimental_hls_enabled:
+                for fallback in channel.experimental_hls:
+                    remaining = deadline - loop.time()
+                    if remaining <= 1:
+                        errors.append("已達整體解析逾時")
+                        break
+                    try:
+                        stream = await self._resolve_experimental_hls(
+                            channel,
+                            fallback,
+                            timeout_seconds=min(10.0, remaining),
+                        )
+                    except Exception as exc:
+                        errors.append(
+                            f"實驗性備援 {fallback.name}：{_clean_error(str(exc), 280)}"
+                        )
+                        continue
+                    return self._store_success(channel_id, stream, "HLS 健康檢查")
+
             for source in channel.sources:
                 for profile in ("mweb", "web_safari", "default"):
                     remaining = deadline - loop.time()
@@ -192,6 +224,139 @@ class YouTubeResolver:
             )
             LOGGER.warning("Unable to resolve %s: %s", channel_id, message)
             raise ResolveError(message)
+
+    async def _probe_request(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        *,
+        limit: int,
+    ) -> tuple[str, int, str, bytes]:
+        current_url = validate_upstream_url(url)
+        for _ in range(6):
+            request = client.build_request("GET", current_url, headers=headers)
+            response = await client.send(request, stream=True, follow_redirects=False)
+            try:
+                validate_upstream_url(str(response.url))
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ResolveError("上游重新導向缺少網址")
+                    current_url = validate_upstream_url(
+                        urllib.parse.urljoin(str(response.url), location)
+                    )
+                    continue
+
+                chunks: list[bytes] = []
+                total = 0
+                if response.is_stream_consumed:
+                    chunks.append(response.content)
+                    total = len(response.content)
+                else:
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > limit:
+                            raise ResolveError("上游健康檢查內容過大")
+                        chunks.append(chunk)
+                if total > limit:
+                    raise ResolveError("上游健康檢查內容過大")
+                return (
+                    str(response.url),
+                    response.status_code,
+                    response.headers.get("content-type", ""),
+                    b"".join(chunks),
+                )
+            finally:
+                await response.aclose()
+        raise ResolveError("上游重新導向次數過多")
+
+    async def _probe_hls_with_client(
+        self,
+        client: httpx.AsyncClient,
+        fallback: HLSFallback,
+        headers: dict[str, str],
+    ) -> None:
+        current_url = fallback.url
+        for _ in range(3):
+            manifest_url, status, _, body = await self._probe_request(
+                client, current_url, headers, limit=512 * 1024
+            )
+            if status < 200 or status >= 300:
+                raise ResolveError(f"播放清單回應 HTTP {status}")
+            if not body.lstrip().startswith(b"#EXTM3U"):
+                raise ResolveError("上游沒有回傳 HLS 播放清單")
+
+            first_uri = next(
+                (
+                    line.strip()
+                    for line in body.decode("utf-8", errors="replace").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                ),
+                None,
+            )
+            if not first_uri:
+                raise ResolveError("HLS 播放清單沒有影音網址")
+            next_url = validate_upstream_url(
+                urllib.parse.urljoin(manifest_url, first_uri)
+            )
+
+            if b"#EXT-X-STREAM-INF:" in body:
+                current_url = next_url
+                continue
+
+            segment_headers = {**headers, "Range": "bytes=0-2047"}
+            _, segment_status, _, segment = await self._probe_request(
+                client, next_url, segment_headers, limit=64 * 1024
+            )
+            if segment_status not in {200, 206} or not segment:
+                raise ResolveError(f"第一個影音分段回應 HTTP {segment_status}")
+            prefix = segment.lstrip()[:32].lower()
+            if prefix.startswith((b"<!doctype html", b"<html")):
+                raise ResolveError("第一個影音分段回傳錯誤網頁")
+            return
+
+        raise ResolveError("HLS 播放清單層級過深")
+
+    async def _resolve_experimental_hls(
+        self,
+        channel: Channel,
+        fallback: HLSFallback,
+        *,
+        timeout_seconds: float,
+    ) -> ResolvedStream:
+        headers = {
+            "Accept": "*/*",
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"
+            ),
+        }
+
+        async with asyncio.timeout(timeout_seconds):
+            if self._http_client is not None:
+                await self._probe_hls_with_client(self._http_client, fallback, headers)
+            else:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
+                    http2=True,
+                ) as client:
+                    await self._probe_hls_with_client(client, fallback, headers)
+
+        resolved_at = utcnow()
+        return ResolvedStream(
+            channel_id=channel.id,
+            source=f"實驗性備援：{fallback.name}",
+            stream_url=fallback.url,
+            webpage_url=fallback.source_page,
+            title=channel.name,
+            video_id=f"experimental-{channel.id}",
+            protocol="m3u8_native",
+            height=None,
+            headers=headers,
+            resolved_at=resolved_at,
+            expires_at=_expiry_from_url(fallback.url),
+        )
 
     def _store_success(
         self, channel_id: str, stream: ResolvedStream, profile: str

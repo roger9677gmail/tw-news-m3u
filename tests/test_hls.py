@@ -17,6 +17,8 @@ def test_validate_upstream_url_allowlist() -> None:
     assert validate_upstream_url("https://rr1---sn.example.googlevideo.com/videoplayback?id=1")
     assert validate_upstream_url("https://4gtvfreemobile-cds.cdn.hinet.net/live/index.m3u8")
     assert validate_upstream_url("https://4gtvfreemobile-mozai.4gtv.tv/live/index.m3u8")
+    assert validate_upstream_url("http://4gtv.cnlive.club/channel/test/index.m3u8")
+    assert validate_upstream_url("http://38.64.72.148/hls/news.m3u8")
     with pytest.raises(UnsafeUpstreamURL):
         validate_upstream_url("https://example.com/private")
     with pytest.raises(UnsafeUpstreamURL):

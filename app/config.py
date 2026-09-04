@@ -12,6 +12,13 @@ CHANNEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 
 
 @dataclass(frozen=True, slots=True)
+class HLSFallback:
+    name: str
+    url: str
+    source_page: str
+
+
+@dataclass(frozen=True, slots=True)
 class Channel:
     id: str
     name: str
@@ -20,6 +27,7 @@ class Channel:
     sources: tuple[str, ...]
     fourgtv_channel_id: str | None = None
     fourgtv_asset_id: str | None = None
+    experimental_hls: tuple[HLSFallback, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +45,7 @@ class Settings:
     upstream_timeout_seconds: float
     max_token_entries: int
     log_level: str
+    experimental_hls_enabled: bool = True
     gcp_project_id: str = ""
     karaoke_bucket: str = ""
     karaoke_prefix: str = "karaoke"
@@ -74,6 +83,18 @@ def _float_env(name: str, default: float, minimum: float, maximum: float) -> flo
     return max(minimum, min(value, maximum))
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} 必須是 true 或 false")
+
+
 def load_settings() -> Settings:
     channels_path = Path(os.getenv("CHANNELS_FILE", str(ROOT / "channels.json"))).expanduser()
     public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -93,6 +114,7 @@ def load_settings() -> Settings:
         upstream_timeout_seconds=_float_env("UPSTREAM_TIMEOUT_SECONDS", 25.0, 5.0, 120.0),
         max_token_entries=_int_env("MAX_TOKEN_ENTRIES", 30000, 1000, 200000),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        experimental_hls_enabled=_bool_env("EXPERIMENTAL_HLS_ENABLED", True),
         gcp_project_id=os.getenv("GCP_PROJECT_ID", "").strip(),
         karaoke_bucket=os.getenv("KARAOKE_BUCKET", "").strip(),
         karaoke_prefix=os.getenv("KARAOKE_PREFIX", "karaoke").strip().strip("/") or "karaoke",
@@ -163,6 +185,36 @@ def load_channels(path: Path) -> tuple[Channel, ...]:
             fourgtv_channel_id = raw_channel_id.strip()
             fourgtv_asset_id = raw_asset_id.strip()
 
+        experimental_hls_values = item.get("experimental_hls", [])
+        if not isinstance(experimental_hls_values, list):
+            raise RuntimeError(f"頻道 {channel_id} 的 experimental_hls 必須是陣列")
+        experimental_hls: list[HLSFallback] = []
+        for fallback_index, fallback in enumerate(experimental_hls_values):
+            if not isinstance(fallback, dict):
+                raise RuntimeError(
+                    f"頻道 {channel_id} 的第 {fallback_index + 1} 個 experimental_hls 必須是物件"
+                )
+            fallback_name = fallback.get("name")
+            fallback_url = fallback.get("url")
+            source_page = fallback.get("source_page")
+            if not isinstance(fallback_name, str) or not fallback_name.strip():
+                raise RuntimeError(f"頻道 {channel_id} 的實驗性 HLS 缺少 name")
+            if not isinstance(fallback_url, str) or not fallback_url.startswith(
+                ("https://", "http://")
+            ):
+                raise RuntimeError(f"頻道 {channel_id} 的實驗性 HLS 網址不合法")
+            if not isinstance(source_page, str) or not source_page.startswith(
+                ("https://", "http://")
+            ):
+                raise RuntimeError(f"頻道 {channel_id} 的實驗性 HLS 缺少 source_page")
+            experimental_hls.append(
+                HLSFallback(
+                    name=fallback_name.strip(),
+                    url=fallback_url.strip(),
+                    source_page=source_page.strip(),
+                )
+            )
+
         channels.append(
             Channel(
                 id=channel_id,
@@ -172,6 +224,7 @@ def load_channels(path: Path) -> tuple[Channel, ...]:
                 sources=tuple(sources),
                 fourgtv_channel_id=fourgtv_channel_id,
                 fourgtv_asset_id=fourgtv_asset_id,
+                experimental_hls=tuple(experimental_hls),
             )
         )
 

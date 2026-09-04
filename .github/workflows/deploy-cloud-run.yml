@@ -87,6 +87,7 @@ jobs:
             MEDIA_TOKEN_TTL_SECONDS=21600
             MAX_TOKEN_ENTRIES=30000
             UPSTREAM_TIMEOUT_SECONDS=25
+            EXPERIMENTAL_HLS_ENABLED=true
             LOG_LEVEL=INFO
             TZ=Asia/Taipei
             FOURGTV_CACHE_FILE=/var/secrets/fourgtv/streams.json

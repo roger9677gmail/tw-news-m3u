@@ -16,6 +16,11 @@ ALLOWED_HOST_SUFFIXES = (
     "googleusercontent.com",
     "4gtv.tv",
     "cdn.hinet.net",
+    # Explicitly scoped experimental fallbacks found in public GitHub IPTV
+    # lists. They remain behind the relay access key and are health-checked
+    # before use; arbitrary hosts are still rejected.
+    "4gtv.cnlive.club",
+    "38.64.72.148",
 )
 URI_ATTRIBUTE_RE = re.compile(r'(?P<prefix>\bURI=)(?P<quote>["\'])(?P<uri>.*?)(?P=quote)')
 RESOLUTION_HEIGHT_RE = re.compile(r"(?:^|,)RESOLUTION=\d+x(?P<height>\d+)(?:,|$)")
